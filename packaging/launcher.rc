@@ -1,0 +1,37 @@
+#include <windows.h>
+
+/* Resource 1 is the executable icon shown by Explorer and the launcher dialog. */
+1 ICON "launcher.ico"
+
+/* windres does not define names for the standard manifest resource IDs. */
+1 24 "launcher.manifest"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION     1,0,0,0
+PRODUCTVERSION  1,0,0,0
+FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
+FILEFLAGS       0x0L
+FILEOS          VOS_NT_WINDOWS32
+FILETYPE        VFT_APP
+FILESUBTYPE     VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"          /* US English, Unicode resource block */
+        BEGIN
+            VALUE "CompanyName",      "maragotchi"
+            VALUE "FileDescription",  "Tamagotchi Color Launcher"
+            VALUE "FileVersion",      "1.0.0.0"
+            VALUE "InternalName",     "tama-launcher"
+            VALUE "LegalCopyright",   "Copyright (C) 2026 maragotchi - GPLv3"
+            VALUE "OriginalFilename", "tama-launcher.exe"
+            VALUE "ProductName",      "tamaemu"
+            VALUE "ProductVersion",   "1.0.0.0"
+            VALUE "Comments",         "Emulator only - no Tamagotchi firmware is included."
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
