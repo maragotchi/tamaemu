@@ -46,7 +46,7 @@ Run two instances with different saves; they find each other automatically. Conn
 
 ## Saves
 
-Saves are stored in `<rom>.sav` next to your ROM file. Delete (or rename) the `.bin` for a
+Saves are stored in `<rom>.sav` next to your ROM file. Rename the `.bin` for a
 factory-fresh restart.
 
 ## Licence
