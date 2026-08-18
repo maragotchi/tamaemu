@@ -8,12 +8,12 @@ Plus Color (Hexagontchi).
 
 Connection play is fully fleshed out, so devices can propose, play and exchange gifts!
 
-Cross-device play is spotty, and I don't recomment trying to connect IDL to P's just yet... It might work but it's not 100% there yet.
+Cross-model play is spotty (ie, connecting an IDL to a P's) so don't rely on it. It might work but it's not 100% there yet.
 
 ## Firmware
 
 This project does not include or download Tamagotchi firmware and never will. You need a
-`.bin` dump (4 or 8 MB) of a device you own. The file is read locally on your device!
+rom dump of a device you own. The file is read locally on your device!
 
 ## Controls
 
@@ -48,13 +48,6 @@ Run two instances with different saves; they find each other automatically. Conn
 
 Saves are stored in `<rom>.sav` next to your ROM file. Delete (or rename) the `.bin` for a
 factory-fresh restart.
-
-## Logs
-
-The Windows launcher records emulator output in `emu_run.log` beside the launcher. Each
-log is capped at 2 MiB; when it fills, the previous log is retained as `.1` and `.2`,
-with older logs removed. If multiple emulator instances are running, they use separate
-`emu_run_*.log` files.
 
 ## Licence
 
