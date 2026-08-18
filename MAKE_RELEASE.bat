@@ -57,8 +57,8 @@ rem manifest are all inputs to the shipped binaries.
 copy /y packaging\launcher.rc       "%STAGE%\packaging\" >nul
 copy /y packaging\launcher.manifest "%STAGE%\packaging\" >nul
 copy /y packaging\launcher.ico      "%STAGE%\packaging\" >nul
-copy /y packaging\tamaps.rc         "%STAGE%\packaging\" >nul
-copy /y packaging\tamaps.ico        "%STAGE%\packaging\" >nul
+copy /y packaging\tamaemu.rc        "%STAGE%\packaging\" >nul
+copy /y packaging\tamaemu.ico       "%STAGE%\packaging\" >nul
 copy /y docs\device-map.md           "%STAGE%\docs\" >nul
 if exist LICENSE copy /y LICENSE "%STAGE%\" >nul
 

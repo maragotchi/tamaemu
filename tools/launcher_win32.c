@@ -458,7 +458,7 @@ static void show_welcome(void)
         wc.hInstance     = GetModuleHandleW(NULL);
         wc.hCursor       = LoadCursorW(NULL, IDC_ARROW);
         wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
-        wc.lpszClassName = L"tamaps_help";
+        wc.lpszClassName = L"tamaemu_help";
         RegisterClassW(&wc);
         registered = 1;
     }
@@ -472,7 +472,7 @@ static void show_welcome(void)
     int x = mr.left + ((mr.right - mr.left) - (wr.right - wr.left)) / 2;
     int y = mr.top  + ((mr.bottom - mr.top) - (wr.bottom - wr.top)) / 3;
 
-    g_help_wnd = CreateWindowExW(WS_EX_DLGMODALFRAME, L"tamaps_help",
+    g_help_wnd = CreateWindowExW(WS_EX_DLGMODALFRAME, L"tamaemu_help",
                                  L"How to use",
                                  WS_CAPTION | WS_SYSMENU | WS_POPUP,
                                  x, y, wr.right - wr.left, wr.bottom - wr.top,
@@ -637,13 +637,13 @@ static void remember_lib(const DlcDevice *d, const wchar_t *lib)
     reg_set_str(name, lib);
 }
 
-/* Use TAMAPS_ROM first, then this device's saved ROM path. */
+/* Use TAMAEMU_ROM first, then this device's saved ROM path. */
 static void default_rom(const DlcDevice *d, wchar_t *out, int outsz)
 {
     out[0] = L'\0';
 
     wchar_t env[MAX_PATH];
-    DWORD n = GetEnvironmentVariableW(L"TAMAPS_ROM", env, MAX_PATH);
+    DWORD n = GetEnvironmentVariableW(L"TAMAEMU_ROM", env, MAX_PATH);
     if (n > 0 && n < MAX_PATH && file_exists(env)) {
         wcsncpy(out, env, (size_t)outsz - 1);
         out[outsz - 1] = L'\0';
@@ -1037,7 +1037,7 @@ static void open_set_dialog(int idx)
         wc.hInstance     = GetModuleHandleW(NULL);
         wc.hCursor       = LoadCursorW(NULL, IDC_ARROW);
         wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
-        wc.lpszClassName = L"tamaps_set";
+        wc.lpszClassName = L"tamaemu_set";
         RegisterClassW(&wc);
         registered = 1;
     }
@@ -1066,7 +1066,7 @@ static void open_set_dialog(int idx)
     int x = mr.left + ((mr.right - mr.left) - (wr.right - wr.left)) / 2;
     int y = mr.top  + ((mr.bottom - mr.top) - (wr.bottom - wr.top)) / 3;
 
-    g_set_wnd = CreateWindowExW(WS_EX_DLGMODALFRAME, L"tamaps_set", title,
+    g_set_wnd = CreateWindowExW(WS_EX_DLGMODALFRAME, L"tamaemu_set", title,
                                 WS_CAPTION | WS_SYSMENU | WS_POPUP,
                                 x, y, wr.right - wr.left, wr.bottom - wr.top,
                                 g_main, NULL, GetModuleHandleW(NULL), NULL);
@@ -1878,7 +1878,7 @@ static int pick_slots_to_free(const DlcKind *k, const DlcSlot *slots, int ns,
         wc.hInstance     = GetModuleHandleW(NULL);
         wc.hCursor       = LoadCursorW(NULL, IDC_ARROW);
         wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-        wc.lpszClassName = L"tamaps_room";
+        wc.lpszClassName = L"tamaemu_room";
         RegisterClassW(&wc);
         registered = 1;
     }
@@ -1922,7 +1922,7 @@ static int pick_slots_to_free(const DlcKind *k, const DlcSlot *slots, int ns,
     int x = mr.left + ((mr.right - mr.left) - (wr.right - wr.left)) / 2;
     int y = mr.top  + ((mr.bottom - mr.top) - (wr.bottom - wr.top)) / 3;
 
-    g_room_wnd = CreateWindowExW(WS_EX_DLGMODALFRAME, L"tamaps_room",
+    g_room_wnd = CreateWindowExW(WS_EX_DLGMODALFRAME, L"tamaemu_room",
                                  L"Make room", WS_CAPTION | WS_SYSMENU | WS_POPUP,
                                  x, y, wr.right - wr.left, wr.bottom - wr.top,
                                  g_main, NULL, GetModuleHandleW(NULL), NULL);

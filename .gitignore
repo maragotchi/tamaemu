@@ -29,5 +29,5 @@ hdrscan.exe
 bench_mem.exe
 tama-launcher-dbg.exe
 launcher_debug.txt
-packaging/tamaps.res
+packaging/tamaemu.res
 packaging/launcher.res

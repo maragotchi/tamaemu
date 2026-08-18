@@ -17,7 +17,7 @@ BEGIN
         BLOCK "040904B0"          /* US English, Unicode resource block */
         BEGIN
             VALUE "CompanyName",      "maragotchi"
-            VALUE "FileDescription",  "Tamagotchi P's emulator"
+            VALUE "FileDescription",  "Tamagotchi Color emulator"
             VALUE "FileVersion",      "1.0.0.0"
             VALUE "InternalName",     "tamaemu"
             VALUE "LegalCopyright",   "Copyright (C) 2026 maragotchi - GPLv3"

@@ -32,11 +32,11 @@ where gcc >nul 2>&1 || (
 )
 
 echo [1/4] resources ^(app icon, version^)
-windres packaging\tamaps.rc -O coff -o packaging\tamaps.res || goto :fail
+windres packaging\tamaemu.rc -O coff -o packaging\tamaemu.res || goto :fail
 
 echo [2/4] tamaemu-sdl.exe   ^(the one you play^)
 gcc -std=c11 -O2 -Wall -Wextra -DUSE_SDL -DSDL_MAIN_HANDLED ^
-    -o tamaemu-sdl.exe src\*.c packaging\tamaps.res ^
+    -o tamaemu-sdl.exe src\*.c packaging\tamaemu.res ^
     -lSDL2 -lwinmm -lws2_32 || goto :fail
 
 echo [3/4] tamaemu.exe       ^(no SDL - headless / diagnostics^)
