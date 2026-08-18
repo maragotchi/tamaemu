@@ -31,14 +31,14 @@ windres packaging\launcher.rc -O coff -o packaging\launcher.res || goto :fail
 echo [2/2] tama-launcher.exe
 gcc -std=c11 -O2 -Wall -Wextra -mwindows -DUNICODE -D_UNICODE -Itools ^
     -o tama-launcher.exe ^
-    tools\launcher_win32.c tools\dlc.c tools\dlc_scan.c tools\dlc_names_4u.c tools\swapreq.c packaging\launcher.res ^
+    tools\launcher_win32.c tools\logcap.c tools\dlc.c tools\dlc_scan.c tools\dlc_names_4u.c tools\swapreq.c packaging\launcher.res ^
     -lcomctl32 -lcomdlg32 -lshell32 -lole32 -luuid -lgdiplus -ladvapi32 || goto :fail
 
 if /i "%~1"=="DEBUG" (
   echo [+]   tama-launcher-dbg.exe
   gcc -std=c11 -O2 -Wall -Wextra -mwindows -DUNICODE -D_UNICODE -DLAUNCHER_DEBUG -Itools ^
       -o tama-launcher-dbg.exe ^
-      tools\launcher_win32.c tools\dlc.c tools\dlc_scan.c tools\dlc_names_4u.c tools\swapreq.c packaging\launcher.res ^
+      tools\launcher_win32.c tools\logcap.c tools\dlc.c tools\dlc_scan.c tools\dlc_names_4u.c tools\swapreq.c packaging\launcher.res ^
       -lcomctl32 -lcomdlg32 -lshell32 -lole32 -luuid -lgdiplus -ladvapi32 || goto :fail
 )
 

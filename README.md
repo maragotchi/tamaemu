@@ -49,6 +49,13 @@ Run two instances with different saves; they find each other automatically. Conn
 Saves are stored in `<rom>.sav` next to your ROM file. Delete (or rename) the `.bin` for a
 factory-fresh restart.
 
+## Logs
+
+The Windows launcher records emulator output in `emu_run.log` beside the launcher. Each
+log is capped at 2 MiB; when it fills, the previous log is retained as `.1` and `.2`,
+with older logs removed. If multiple emulator instances are running, they use separate
+`emu_run_*.log` files.
+
 ## Licence
 
 GPL-3.0 — see `LICENSE`.

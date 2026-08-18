@@ -12,6 +12,7 @@
 #include <string.h>
 
 #include "dlc.h"
+#include "logcap.h"
 #include "swapreq.h"
 
 /* GDI+ flat API declarations for item previews; mingw's gdiplus.h is C++ only. */
@@ -44,6 +45,7 @@ int  WINAPI GdipCreateBitmapFromScan0(INT w, INT h, INT stride, INT format,
 #define APP_TITLE L"Tamagotchi Color Launcher"
 #define EMU_EXE   L"tamaemu-sdl.exe"
 #define EMU_LOG   L"emu_run.log"
+#define LOG_DIR   L"logs"
 #define ROM_MEMO  L"rom_path.txt"
 #define LIB_DIR   L"tamagotchi_dlc"
 
@@ -192,6 +194,30 @@ static void say(UINT icon, const wchar_t *title, const wchar_t *fmt, ...)
     va_end(ap);
     buf[sizeof buf / sizeof buf[0] - 1] = L'\0';
     MessageBoxW(g_main, buf, title, MB_OK | icon);
+}
+
+#define EMU_LOG_LIMIT (2ULL * 1024ULL * 1024ULL)
+
+typedef struct LogCapture {
+    HANDLE read;
+    LogCap log;
+} LogCapture;
+
+static DWORD WINAPI log_capture_thread(void *arg)
+{
+    LogCapture *capture = (LogCapture *)arg;
+    char buf[64 * 1024];
+    DWORD got;
+
+    while (ReadFile(capture->read, buf, sizeof buf, &got, NULL) && got) {
+        /* Keep draining even if the disk becomes unavailable, so the child
+         * cannot deadlock on a full pipe. */
+        (void)logcap_write(&capture->log, buf, got);
+    }
+    CloseHandle(capture->read);
+    logcap_close(&capture->log);
+    free(capture);
+    return 0;
 }
 
 /* Welcome dialog */
@@ -2237,44 +2263,72 @@ static void do_play(void)
     sa.lpSecurityDescriptor = NULL;
     sa.bInheritHandle = TRUE;
 
-    /* Give each emulator a separate log without truncating another run. */
+    /* Capture through a pipe so the logger can enforce a live size cap. */
+    wchar_t logdir[MAX_PATH];
     wchar_t logpath[MAX_PATH];
-    HANDLE hlog = INVALID_HANDLE_VALUE;
-    for (int n = 1; n <= 8; n++) {
+    join(logdir, MAX_PATH, g_root, LOG_DIR);
+    CreateDirectoryW(logdir, NULL); /* ERROR_ALREADY_EXISTS is harmless. */
+    LogCapture *capture = (LogCapture *)calloc(1, sizeof *capture);
+    HANDLE pipe_write = INVALID_HANDLE_VALUE;
+    HANDLE capture_thread = NULL;
+    int log_open = -1;
+    for (int n = 1; n <= 8 && log_open != 0; n++) {
         wchar_t leaf[64];
         if (n == 1) wcscpy(leaf, EMU_LOG);
         else        _snwprintf(leaf, 64, L"emu_run_%d.log", n);
         leaf[63] = 0;
-        join(logpath, MAX_PATH, g_root, leaf);
-        hlog = CreateFileW(logpath, GENERIC_WRITE, FILE_SHARE_READ, &sa,
-                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hlog != INVALID_HANDLE_VALUE) break;
+        join(logpath, MAX_PATH, logdir, leaf);
+        if (capture)
+            log_open = logcap_open(&capture->log, logpath, EMU_LOG_LIMIT,
+                                   LOGCAP_RETAINED);
+    }
+    if (log_open != 0 && capture) {
+        free(capture);
+        capture = NULL;
+    }
+
+    if (capture && CreatePipe(&capture->read, &pipe_write, &sa, 0)) {
+        SetHandleInformation(capture->read, HANDLE_FLAG_INHERIT, 0);
+        {
+            char cmda[CMDCAP + 16];
+            int n = _snprintf(cmda, sizeof cmda, "[launcher] ");
+            w2a(cmd, cmda + n, (int)sizeof cmda - n - 2);
+            size_t len = strlen(cmda);
+            if (len + 2 < sizeof cmda) {
+                cmda[len++] = '\r';
+                cmda[len++] = '\n';
+                (void)logcap_write(&capture->log, cmda, len);
+            }
+        }
+        capture_thread = CreateThread(NULL, 0, log_capture_thread, capture, 0, NULL);
+        if (!capture_thread) {
+            CloseHandle(capture->read);
+            capture->read = NULL;
+            logcap_close(&capture->log);
+            free(capture);
+            capture = NULL;
+            CloseHandle(pipe_write);
+            pipe_write = INVALID_HANDLE_VALUE;
+        }
+    } else if (capture) {
+        logcap_close(&capture->log);
+        free(capture);
+        capture = NULL;
     }
     HANDLE hnul = CreateFileW(L"NUL", GENERIC_READ,
                               FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-
-    /* Record the exact launch arguments as the first log line. */
-    if (hlog != INVALID_HANDLE_VALUE) {
-        char cmda[CMDCAP + 16];
-        int n = _snprintf(cmda, sizeof cmda, "[launcher] ");
-        w2a(cmd, cmda + n, (int)sizeof cmda - n - 2);
-        size_t len = strlen(cmda);
-        if (len + 2 < sizeof cmda) { cmda[len++] = '\r'; cmda[len++] = '\n'; }
-        DWORD wrote;
-        WriteFile(hlog, cmda, (DWORD)len, &wrote, NULL);
-    }
 
     STARTUPINFOW si;
     PROCESS_INFORMATION pi;
     memset(&si, 0, sizeof si);
     memset(&pi, 0, sizeof pi);
     si.cb = sizeof si;
-    if (hlog != INVALID_HANDLE_VALUE && hnul != INVALID_HANDLE_VALUE) {
+    if (capture && pipe_write != INVALID_HANDLE_VALUE && hnul != INVALID_HANDLE_VALUE) {
         si.dwFlags    = STARTF_USESTDHANDLES;
         si.hStdInput  = hnul;
-        si.hStdOutput = hlog;
-        si.hStdError  = hlog;
+        si.hStdOutput = pipe_write;
+        si.hStdError  = pipe_write;
     }
 
     BOOL ok = CreateProcessW(emu, cmd, NULL, NULL,
@@ -2283,14 +2337,19 @@ static void do_play(void)
                              NULL, g_root, &si, &pi);
     DWORD gle = GetLastError();
 
-    if (hlog != INVALID_HANDLE_VALUE) CloseHandle(hlog);
+    if (pipe_write != INVALID_HANDLE_VALUE) CloseHandle(pipe_write);
     if (hnul != INVALID_HANDLE_VALUE) CloseHandle(hnul);
 
     if (!ok) {
+        if (capture_thread) {
+            WaitForSingleObject(capture_thread, INFINITE);
+            CloseHandle(capture_thread);
+        }
         say(MB_ICONERROR, L"Could not start the emulator",
             L"CreateProcess failed (error %lu) for:\n%s", gle, emu);
         return;
     }
+    if (capture_thread) CloseHandle(capture_thread);
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
 }
