@@ -4,6 +4,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <sys/stat.h>
+#ifdef _WIN32
+#include <direct.h>
+#define TEST_MKDIR(p) _mkdir(p)
+#define TEST_RMDIR(p) _rmdir(p)
+#else
+#define TEST_MKDIR(p) mkdir(p, 0700)
+#define TEST_RMDIR(p) rmdir(p)
+#endif
 
 static int fails;
 #define CHECK(cond, ...) do { if (!(cond)) { fails++; \
@@ -1605,6 +1614,50 @@ static void test_dlc_extract_short_length_field(void)
     remove(path);
 }
 
+static void test_dlc_extract_rejects_oversized_file(void)
+{
+    const char *path = "extract_oversized_test.tmp";
+    FILE *f = fopen(path, "wb");
+    CHECK(f != NULL, "oversized extract fixture created");
+    if (f) {
+        CHECK(fseek(f, (long)DLC_PAYLOAD_MAX, SEEK_SET) == 0 &&
+              fputc(0, f) != EOF,
+              "oversized extract fixture extended");
+        fclose(f);
+    }
+
+    uint8_t *out = NULL; size_t outlen = 0; char err[DLC_ERR_MAX] = "";
+    CHECK(dlc_extract_payload(path, &out, &outlen, err, sizeof err) != 0 &&
+          strstr(err, "too large") != NULL,
+          "oversized payload is rejected before reading it: err='%s'", err);
+    free(out);
+    remove(path);
+}
+
+static void test_dlc_scan_bounds_broad_folder(void)
+{
+    const char *dir = "dlc_broad_folder_test.tmp";
+    char path[128];
+    CHECK(TEST_MKDIR(dir) == 0, "broad-folder fixture created");
+    for (int i = 0; i < DLC_SCAN_MAX_ENTRIES + 32; i++) {
+        snprintf(path, sizeof path, "%s/f%04d.bin", dir, i);
+        FILE *f = fopen(path, "wb");
+        CHECK(f != NULL, "broad-folder fixture file %d created", i);
+        if (f) fclose(f);
+    }
+
+    DlcItem *items = NULL; int count = -1;
+    CHECK(dlc_scan_library(dlc_device_find("idl"), dir, &items, &count) == 0 &&
+          count == 0,
+          "broad folder scan is bounded and returns no invalid records: %d", count);
+    free(items);
+    for (int i = 0; i < DLC_SCAN_MAX_ENTRIES + 32; i++) {
+        snprintf(path, sizeof path, "%s/f%04d.bin", dir, i);
+        remove(path);
+    }
+    TEST_RMDIR(dir);
+}
+
 static void test_devices(void)
 {
     test_device_table();
@@ -1693,6 +1746,8 @@ int main(void)
     test_dlc_route_id();
     test_dlc_inject_id_game_outing();
     test_dlc_extract_short_length_field();
+    test_dlc_extract_rejects_oversized_file();
+    test_dlc_scan_bounds_broad_folder();
     test_dlc_slots();
     test_dlc_free_slot();
     test_dlc_place_at();

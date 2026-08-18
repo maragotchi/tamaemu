@@ -49,6 +49,7 @@ gcc -std=c11 -O2 -Wall -Wextra ^
     -o test_all.exe tests\test_all.c ^
     src\cpu.c src\mem.c src\periph.c src\lcd.c src\link.c src\disasm.c src\panel.c ^
     src\device.c src\pn512.c src\nfcpeer.c tools\dlc.c tools\swapreq.c ^
+    tools\dlc_scan.c tools\dlc_names_4u.c ^
     -lwinmm -lws2_32 || goto :fail
 
 echo.

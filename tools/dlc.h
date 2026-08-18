@@ -8,6 +8,8 @@
 #include <stdio.h>
 
 #define DLC_IMAGE_SIZE (8u * 1024u * 1024u)
+#define DLC_PAYLOAD_MAX (64u * 1024u * 1024u)
+#define DLC_SCAN_MAX_ENTRIES 8192
 #define DLC_ID_MAX     0x15      /* header id field is 0x34..0x48 + NUL */
 #define DLC_NAME_MAX   256       /* UTF-8 of a 23-unit UTF-16BE name */
 #define DLC_ERR_MAX    160
