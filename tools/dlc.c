@@ -668,6 +668,12 @@ int dlc_extract_payload(const char *path, uint8_t **out, size_t *outlen,
     long sz = ftell(f);
     fseek(f, 0, SEEK_SET);
     if (sz <= 0) { fclose(f); snprintf(err, errsz, "empty file"); return -1; }
+    if ((unsigned long long)sz > DLC_PAYLOAD_MAX) {
+        fclose(f);
+        snprintf(err, errsz, "payload too large (maximum %u bytes)",
+                 (unsigned)DLC_PAYLOAD_MAX);
+        return -1;
+    }
     uint8_t *d = malloc((size_t)sz);
     if (!d) { fclose(f); snprintf(err, errsz, "out of memory"); return -1; }
     if (fread(d, 1, (size_t)sz, f) != (size_t)sz) {

@@ -197,6 +197,7 @@ static int device_has_tab(const DlcDevice *d, const char *tab)
 }
 
 typedef struct { DlcItem *v; int n, cap; } ItemVec;
+typedef struct { int entries; int limited; } ScanBudget;
 
 static void vec_push(ItemVec *iv, const DlcItem *it)
 {
@@ -208,8 +209,13 @@ static void vec_push(ItemVec *iv, const DlcItem *it)
 }
 
 /* A recognized VDP set becomes one row, so do not scan its parts again. */
-static void walk(const DlcDevice *d, const char *dir, ItemVec *iv)
+static void walk(const DlcDevice *d, const char *dir, ItemVec *iv,
+                 ScanBudget *budget)
 {
+    if (budget->entries >= DLC_SCAN_MAX_ENTRIES) {
+        budget->limited = 1;
+        return;
+    }
     DIR *dh = opendir(dir);
     if (!dh) return;
 
@@ -220,6 +226,10 @@ static void walk(const DlcDevice *d, const char *dir, ItemVec *iv)
     struct dirent *e;
     while ((e = readdir(dh)) != NULL) {
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        if (budget->entries++ >= DLC_SCAN_MAX_ENTRIES) {
+            budget->limited = 1;
+            break;
+        }
         char full[DLC_PATH_MAX];
         snprintf(full, sizeof full, "%s/%s", dir, e->d_name);
         struct stat st;
@@ -269,7 +279,7 @@ static void walk(const DlcDevice *d, const char *dir, ItemVec *iv)
     }
 
     if (!pruned)
-        for (int i = 0; i < ns; i++) walk(d, subs[i], iv);
+        for (int i = 0; i < ns; i++) walk(d, subs[i], iv, budget);
 
     for (int i = 0; i < nf; i++) free(files[i]);
     for (int i = 0; i < ns; i++) free(subs[i]);
@@ -356,7 +366,8 @@ int dlc_scan_library(const DlcDevice *d, const char *libdir,
     if (stat(libdir, &st) != 0 || !S_ISDIR(st.st_mode)) return -1;
 
     ItemVec iv = { NULL, 0, 0 };
-    walk(d, libdir, &iv);
+    ScanBudget budget = { 0, 0 };
+    walk(d, libdir, &iv, &budget);
     g_sort_dev = d;
     qsort(iv.v, (size_t)iv.n, sizeof *iv.v, cmp_item);
     drop_duplicate_records(&iv);
