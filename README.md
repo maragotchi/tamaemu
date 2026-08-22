@@ -41,7 +41,6 @@ Run two instances with DIFFERENT saves. They find each other automatically. Conn
 | iD + iD Melody | yes |
 | Plus Color + Plus Color | yes |
 | Hexagontchi + Hexagontchi | yes |
-| Plus Color + Hexagontchi | yes |
 | 4U or 4U+ pair | yes |
 | mixed pairings | soon... |
 
