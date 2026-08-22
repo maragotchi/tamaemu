@@ -78,6 +78,11 @@ const DeviceProfile *device_default(void);           /* P's */
 void device_list(FILE *f);                           /* --device help */
 int  device_check(const DeviceProfile *d, FILE *f);  /* 0 if it does not fit the ceilings */
 
+/* Make the usual save path beside a ROM. */
+int savepath_default(char *out, size_t outsz, const char *rompath,
+                     const DeviceProfile *dev);
+int savepath_mkdirs(const char *rompath, const DeviceProfile *dev);
+
 #define GRAM_W 132
 #define GRAM_H 162
 /* P's visible panel is 128 x 128. */

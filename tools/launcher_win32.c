@@ -1490,6 +1490,23 @@ static void savepath(wchar_t *out, int outsz)
     get_text(IDC_SAV, out, outsz);
 }
 
+/* Make the same default save path as the emulator. The Save box can still
+ * point somewhere else. */
+static void default_savepath(wchar_t *out, int outsz)
+{
+    wchar_t rom[MAX_PATH], dev[32];
+    get_text(IDC_ROM, rom, MAX_PATH);
+    a2w(g_dev->name, dev, 32);
+    const wchar_t *slash = wcsrchr(rom, L'/');
+    const wchar_t *backslash = wcsrchr(rom, L'\\');
+    if (!slash || (backslash && backslash > slash)) slash = backslash;
+    const wchar_t *filename = slash ? slash + 1 : rom;
+    size_t parent_len = (size_t)(filename - rom);
+    _snwprintf(out, (size_t)outsz, L"%.*ls%s%s%s%s.sav",
+               (int)parent_len, rom, L"saves\\tamagotchi_", dev, L"\\", filename);
+    out[outsz - 1] = L'\0';
+}
+
 /* Read the selected device's flash image, or explain why not. Caller frees. */
 static uint8_t *load_save(const wchar_t *path, wchar_t *why, int whysz)
 {
@@ -1688,23 +1705,20 @@ static void refresh_devnote(void)
 static void on_rom_changed(void)
 {
     if (g_save_follows_rom) {
-        wchar_t rom[MAX_PATH], sav[MAX_PATH + 8];
-        get_text(IDC_ROM, rom, MAX_PATH);
-        _snwprintf(sav, MAX_PATH + 8, L"%s.sav", rom);
-        sav[MAX_PATH + 7] = L'\0';
+        wchar_t sav[MAX_PATH + 64];
+        default_savepath(sav, MAX_PATH + 64);
         set_text(IDC_SAV, sav);
     }
     refresh_status();
     refresh_devnote();
 }
 
-/* Save stops following ROM after a hand edit, unless it again equals <rom>.sav. */
+/* Once someone types a save path, leave it alone until it matches the default again. */
 static void on_save_edited(void)
 {
-    wchar_t rom[MAX_PATH], sav[MAX_PATH], want[MAX_PATH + 8];
-    get_text(IDC_ROM, rom, MAX_PATH);
-    savepath(sav, MAX_PATH);
-    _snwprintf(want, MAX_PATH + 8, L"%s.sav", rom);
+    wchar_t sav[MAX_PATH + 64], want[MAX_PATH + 64];
+    savepath(sav, MAX_PATH + 64);
+    default_savepath(want, MAX_PATH + 64);
     g_save_follows_rom = (wcscmp(sav, want) == 0);
     refresh_status();
     refresh_devnote();
@@ -2232,12 +2246,13 @@ static void do_play(void)
     int buttons = (IsDlgButtonChecked(g_main, IDC_BUTTONS) == BST_CHECKED);
     int ontop   = (IsDlgButtonChecked(g_main, IDC_ONTOP)   == BST_CHECKED);
 
-    /* --sav names the exact file in the Save box, so Play always plays what is
-     * shown above even when it is not called "<rom>.sav". */
+    /* Use the save file the player picked. Otherwise, let the emulator make
+     * the normal folder beside the ROM. */
     enum { CMDCAP = MAX_PATH * 3 + 128 };
     wchar_t cmd[CMDCAP];
-    int at = wappend(cmd, CMDCAP, 0, L"\"%s\" \"%s\" --sav \"%s\"",
-                     emu, rom, sav);
+    int at = g_save_follows_rom
+           ? wappend(cmd, CMDCAP, 0, L"\"%s\" \"%s\"", emu, rom)
+           : wappend(cmd, CMDCAP, 0, L"\"%s\" \"%s\" --sav \"%s\"", emu, rom, sav);
     wchar_t wname[32];
     a2w(g_dev->name, wname, 32);
     at = wappend(cmd, CMDCAP, at, L" --device %s", wname);
@@ -2796,12 +2811,11 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE prev, LPSTR cmdline, int show)
     find_root();
     build_ui();
 
-    wchar_t rom[MAX_PATH], sav[MAX_PATH + 8], lib[MAX_PATH];
+    wchar_t rom[MAX_PATH], sav[MAX_PATH + 64], lib[MAX_PATH];
     default_rom(g_dev, rom, MAX_PATH);
     set_text(IDC_ROM, rom);
     if (rom[0]) {
-        _snwprintf(sav, MAX_PATH + 8, L"%s.sav", rom);
-        sav[MAX_PATH + 7] = L'\0';
+        default_savepath(sav, MAX_PATH + 64);
         set_text(IDC_SAV, sav);
     }
     default_lib(g_dev, lib, MAX_PATH);
