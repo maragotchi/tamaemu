@@ -1,4 +1,3 @@
-
 /* src/main.c parses this protocol independently; keep both sides in sync.
  * Layout, little-endian:
  *   0  magic "TAMASWAP" (8 bytes)

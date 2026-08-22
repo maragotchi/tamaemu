@@ -1,4 +1,3 @@
-
 /* Install downloads into device-specific fixed-size flash slots. */
 #ifndef DLC_H
 #define DLC_H

@@ -1,4 +1,3 @@
-
 #include "dlc.h"
 #include <stdio.h>
 #include <stdlib.h>
