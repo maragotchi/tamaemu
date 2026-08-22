@@ -46,7 +46,6 @@ int  WINAPI GdipCreateBitmapFromScan0(INT w, INT h, INT stride, INT format,
 #define EMU_EXE   L"tamaemu-sdl.exe"
 #define EMU_LOG   L"emu_run.log"
 #define LOG_DIR   L"logs"
-#define ROM_MEMO  L"rom_path.txt"
 #define LIB_DIR   L"tamagotchi_dlc"
 
 /* Append control IDs; diagnostics and UI automation depend on stable values. */
@@ -595,16 +594,11 @@ static void dev_key(const DlcDevice *d, wchar_t *out, size_t outsz)
     out[k] = L'\0';
 }
 
-static void rom_memo_for(const DlcDevice *d, wchar_t *out, size_t outsz)
+static void rom_setting_for(const DlcDevice *d, wchar_t *out, size_t outsz)
 {
-    if (!d || !strcmp(d->name, "ps")) {
-        wcsncpy(out, ROM_MEMO, outsz - 1);
-        out[outsz - 1] = L'\0';
-        return;
-    }
     wchar_t key[32];
     dev_key(d, key, 32);
-    _snwprintf(out, outsz, L"rom_path_%s.txt", key);
+    _snwprintf(out, outsz, L"RomPath_%s", key);
     out[outsz - 1] = L'\0';
 }
 
@@ -650,41 +644,19 @@ static void default_rom(const DlcDevice *d, wchar_t *out, int outsz)
         return;
     }
 
-    wchar_t memo[MAX_PATH], memofile[64];
-    rom_memo_for(d, memofile, sizeof memofile / sizeof memofile[0]);
-    join(memo, MAX_PATH, g_root, memofile);
-    FILE *f = _wfopen(memo, L"rb");
-    if (!f) return;
-    char line[1024] = "";
-    if (fgets(line, sizeof line, f)) {
-        size_t l = strlen(line);
-        while (l && (line[l-1] == '\n' || line[l-1] == '\r' || line[l-1] == ' '))
-            line[--l] = '\0';
-        char *p = line;
-        if (*p == '"') { p++; l = strlen(p); if (l && p[l-1] == '"') p[l-1] = '\0'; }
-        wchar_t cand[MAX_PATH];
-        a2w(p, cand, MAX_PATH);
-        if (cand[0] && file_exists(cand)) {
-            wcsncpy(out, cand, (size_t)outsz - 1);
-            out[outsz - 1] = L'\0';
-        }
-    }
-    fclose(f);
+    wchar_t name[64];
+    rom_setting_for(d, name, 64);
+    reg_get_str(name, out, outsz);
+    if (out[0] && !file_exists(out)) out[0] = L'\0';
 }
 
 /* Save only existing ROM paths. */
 static void remember_rom(const DlcDevice *d, const wchar_t *rom)
 {
     if (!rom[0] || !file_exists(rom)) return;
-    wchar_t memo[MAX_PATH], memofile[64];
-    rom_memo_for(d, memofile, sizeof memofile / sizeof memofile[0]);
-    join(memo, MAX_PATH, g_root, memofile);
-    FILE *f = _wfopen(memo, L"wb");
-    if (!f) return;
-    char a[MAX_PATH * 2];
-    w2a(rom, a, sizeof a);
-    fprintf(f, "%s\r\n", a);
-    fclose(f);
+    wchar_t name[64];
+    rom_setting_for(d, name, 64);
+    reg_set_str(name, rom);
 }
 
 /* Browse dialogs */
