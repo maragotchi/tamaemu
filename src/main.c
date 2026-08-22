@@ -527,13 +527,18 @@ int main(int argc, char **argv)
     fclose(f);
     fprintf(stderr, "[rom] %s: %zu bytes at 0x%08x\n", rompath, n, e.dev.rom_base);
 
-    /* <rom>.sav stores flash; --sav overrides its path. */
+    /* Unless --sav was given, put the save in the device's folder beside the ROM. */
     char savpath_buf[1024];
     const char *savpath;
     if (savoverride) {
         savpath = savoverride;
     } else {
-        snprintf(savpath_buf, sizeof savpath_buf, "%s.sav", rompath);
+        if (!savepath_default(savpath_buf, sizeof savpath_buf, rompath, &e.dev)) {
+            fprintf(stderr, "[flash] save path is too long for %s\n", rompath);
+            return 1;
+        }
+        if (!savepath_mkdirs(rompath, &e.dev))
+            fprintf(stderr, "[flash] cannot create save folder for %s\n", rompath);
         savpath = savpath_buf;
     }
     FILE *sf = fopen(savpath, "rb");
@@ -642,13 +647,6 @@ int main(int argc, char **argv)
         static Emu eb; static Link link;
         memset(&eb, 0, sizeof eb);
         link_reset(&link);
-        char savb_buf[1024];
-        if (!savb) { snprintf(savb_buf, sizeof savb_buf, "%s.sav", linkrom); savb = savb_buf; }
-        if (savpath && savb && !strcmp(savpath, savb)) {
-            fprintf(stderr, "[link] refusing: core A and B would share the same save file '%s' -- "
-                            "pass distinct --sav and --sav-b paths.\n", savpath);
-            return 1;
-        }
         const DeviceProfile *devb = &e.dev;
         if (devb_name) {
             devb = device_find(devb_name);
@@ -658,6 +656,21 @@ int main(int argc, char **argv)
                 return 1;
             }
             if (!device_check(devb, stderr)) return 1;
+        }
+        char savb_buf[1024];
+        if (!savb) {
+            if (!savepath_default(savb_buf, sizeof savb_buf, linkrom, devb)) {
+                fprintf(stderr, "[flash] save path is too long for %s\n", linkrom);
+                return 1;
+            }
+            if (!savepath_mkdirs(linkrom, devb))
+                fprintf(stderr, "[flash] cannot create save folder for %s\n", linkrom);
+            savb = savb_buf;
+        }
+        if (savpath && savb && !strcmp(savpath, savb)) {
+            fprintf(stderr, "[link] refusing: core A and B would share the same save file '%s' -- "
+                            "pass distinct --sav and --sav-b paths.\n", savpath);
+            return 1;
         }
         if (!load_core(&eb, devb, linkrom, savb, persist_ram)) return 1;
         e.link = &link;  e.core_id = 0;

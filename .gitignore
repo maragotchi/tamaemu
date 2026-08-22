@@ -31,3 +31,6 @@ tama-launcher-dbg.exe
 launcher_debug.txt
 packaging/tamaemu.res
 packaging/launcher.res
+*.bat
+logs
+tools\logcap_test.c
