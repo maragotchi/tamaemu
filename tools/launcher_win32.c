@@ -1495,8 +1495,9 @@ static void default_savepath(wchar_t *out, int outsz)
     if (!slash || (backslash && backslash > slash)) slash = backslash;
     const wchar_t *filename = slash ? slash + 1 : rom;
     size_t parent_len = (size_t)(filename - rom);
-    _snwprintf(out, (size_t)outsz, L"%.*ls%s%s%s%s.sav",
-               (int)parent_len, rom, L"saves\\tamagotchi_", dev, L"\\", filename);
+    _snwprintf(out, (size_t)outsz, L"%.*ls%s%s%s%s%s%s",
+               (int)parent_len, rom, L"saves\\tamagotchi_", dev, L"\\", filename,
+               L"\\", L"save.sav");
     out[outsz - 1] = L'\0';
 }
 

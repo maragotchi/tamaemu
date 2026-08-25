@@ -43,6 +43,64 @@ typedef struct TestStateHeader {
     uint32_t version, emu_size, rom_size, flash_crc;
 } TestStateHeader;
 
+static void test_default_save_folder(void)
+{
+    const DeviceProfile *dev = device_find("plus-color");
+    char path[512];
+    CHECK(dev != NULL, "Plus Color profile is available for save-path test");
+    if (!dev) return;
+    CHECK(savepath_default(path, sizeof path, "C:\\roms\\Tamagotchi_PlusColor.bin", dev) &&
+          !strcmp(path, "C:\\roms\\saves\\tamagotchi_plus-color\\Tamagotchi_PlusColor.bin\\save.sav"),
+          "default save is grouped under its ROM name: %s", path);
+}
+
+static void test_save_folder_migration(void)
+{
+    const char *root = "save_migration_test";
+#ifdef _WIN32
+    const char *legacy = "save_migration_test\\old.sav";
+    const char *save = "save_migration_test\\Tamagotchi.bin\\save.sav";
+    const char *oldram = "save_migration_test\\old.sav.ram";
+    const char *oldstate = "save_migration_test\\old.sav.state";
+    const char *newram = "save_migration_test\\Tamagotchi.bin\\save.sav.ram";
+    const char *newstate = "save_migration_test\\Tamagotchi.bin\\save.sav.state";
+    const char *bundle = "save_migration_test\\Tamagotchi.bin";
+#else
+    const char *legacy = "save_migration_test/old.sav";
+    const char *save = "save_migration_test/Tamagotchi.bin/save.sav";
+    const char *oldram = "save_migration_test/old.sav.ram";
+    const char *oldstate = "save_migration_test/old.sav.state";
+    const char *newram = "save_migration_test/Tamagotchi.bin/save.sav.ram";
+    const char *newstate = "save_migration_test/Tamagotchi.bin/save.sav.state";
+    const char *bundle = "save_migration_test/Tamagotchi.bin";
+#endif
+    const char *oldbak = "save_migration_test\\old.sav.bak";
+    const char *newbak = "save_migration_test\\Tamagotchi.bin\\save.sav.bak";
+#ifndef _WIN32
+    oldbak = "save_migration_test/old.sav.bak";
+    newbak = "save_migration_test/Tamagotchi.bin/save.sav.bak";
+#endif
+    const char *oldfiles[] = { legacy, oldram, oldstate, oldbak };
+    const char *newfiles[] = { save, newram, newstate, newbak };
+    TEST_MKDIR(root); TEST_MKDIR(bundle);
+    for (int i = 0; i < 4; i++) {
+        FILE *f = fopen(oldfiles[i], "wb");
+        if (f) { fputs("save bundle", f); fclose(f); }
+    }
+    CHECK(savepath_migrate_legacy(legacy, save) == 1,
+          "legacy save bundle migrates into its ROM folder");
+    for (int i = 0; i < 4; i++) {
+        FILE *f = fopen(newfiles[i], "rb");
+        CHECK(f != NULL, "migrated bundle keeps %s", newfiles[i]);
+        if (f) fclose(f);
+        f = fopen(oldfiles[i], "rb");
+        CHECK(f == NULL, "legacy bundle no longer keeps %s", oldfiles[i]);
+        if (f) fclose(f);
+        remove(newfiles[i]);
+    }
+    TEST_RMDIR(bundle); TEST_RMDIR(root);
+}
+
 static void test_state_save_lock(void)
 {
     const char *path = "state_lock_test.tmp";
@@ -2055,6 +2113,8 @@ static void test_keys_parse(void)
 
 int main(void)
 {
+    test_default_save_folder();
+    test_save_folder_migration();
     test_state_save_lock();
     test_state_snapshot();
     test_state_lifecycle();

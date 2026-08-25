@@ -589,6 +589,15 @@ int main(int argc, char **argv)
         if (!savepath_mkdirs(rompath, &e.dev))
             fprintf(stderr, "[flash] cannot create save folder for %s\n", rompath);
         savpath = savpath_buf;
+        {
+            char legacy_savpath[1024];
+            if (!savepath_legacy_default(legacy_savpath, sizeof legacy_savpath,
+                                         rompath, &e.dev) ||
+                !savepath_migrate_legacy(legacy_savpath, savpath)) {
+                fprintf(stderr, "[flash] cannot move the old save bundle into %s\n", savpath);
+                return 1;
+            }
+        }
     }
     {
         uintptr_t sav_lock = 0;
