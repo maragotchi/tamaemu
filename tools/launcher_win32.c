@@ -6,6 +6,7 @@
 #include <commdlg.h>
 #include <shlobj.h>
 #include <stdarg.h>
+#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -47,7 +48,6 @@ int  WINAPI GdipCreateBitmapFromScan0(INT w, INT h, INT stride, INT format,
 #define LOG_DIR   L"logs"
 #define LIB_DIR   L"tamagotchi_dlc"
 
-/* Append control IDs; diagnostics and UI automation depend on stable values. */
 enum {
     IDC_ROM = 1001, IDC_ROM_BR, IDC_SAV, IDC_SAV_BR, IDC_SAV_MATCH,
     IDC_LIB, IDC_LIB_BR, IDC_AWAKE, IDC_BUTTONS,
@@ -56,7 +56,8 @@ enum {
     IDC_STATUS, IDC_HINT, IDC_WELCOME, IDC_DEVICE,
     IDC_ONTOP,
     IDC_KEY_A, IDC_KEY_B, IDC_KEY_C, /* appended; consecutive - code does IDC_KEY_A + i */
-    IDC_HELP_AGAIN                  /* the help dialog's "Don't show this again" */
+    IDC_HELP_AGAIN,                 
+    IDC_RESUME
 };
 
 /* Button glyphs use the system UI font. U+1F4C1 needs a UTF-16 surrogate pair. */
@@ -70,6 +71,7 @@ enum {
 #define REG_WELCOME L"WelcomeSeen"
 #define REG_BUTTONS L"ShowButtons"
 #define REG_ONTOP   L"AlwaysOnTop"
+#define REG_RESUME  L"ResumeLastSession"
 #define REG_KEYS    L"Keys"
 
 /* Layout uses 96-DPI units and right-anchored rows; S() scales at startup. */
@@ -121,6 +123,7 @@ static int       g_nitems;
 static unsigned char *g_checked;           /* parallel to g_items */
 static int       g_populating;             /* suppress LVN_ITEMCHANGED echo */
 static int       g_save_follows_rom = 1;
+static int       g_resume = 1;
 static wchar_t   g_devnote[160];           /* "Save looks like ...", or "" */
 static int       g_tab_has_sets;           /* the visible tab shows a "[n]" tile */
 static HIMAGELIST g_imgs;                  /* the visible tab's thumbnails */
@@ -182,6 +185,25 @@ static int wappend(wchar_t *buf, int cap, int at, const wchar_t *fmt, ...)
     buf[at] = L'\0';
     return at;
 }
+
+/* Unchecked box asks for a cold start. */
+static int append_resume_flag(wchar_t *cmd, int cap, int at, int resume)
+{
+    return resume ? at : wappend(cmd, cap, at, L" --restart");
+}
+
+#ifdef LAUNCHER_DEBUG
+static void launcher_debug_resume_check(void)
+{
+    wchar_t cmd[32] = L"tamaemu-sdl.exe";
+    int at = (int)wcslen(cmd);
+    assert(append_resume_flag(cmd, 32, at, 1) == at);
+    assert(!wcscmp(cmd, L"tamaemu-sdl.exe"));
+    at = append_resume_flag(cmd, 32, at, 0);
+    assert(at == (int)wcslen(L"tamaemu-sdl.exe --restart"));
+    assert(!wcscmp(cmd, L"tamaemu-sdl.exe --restart"));
+}
+#endif
 
 static void say(UINT icon, const wchar_t *title, const wchar_t *fmt, ...)
 {
@@ -1473,8 +1495,9 @@ static void default_savepath(wchar_t *out, int outsz)
     if (!slash || (backslash && backslash > slash)) slash = backslash;
     const wchar_t *filename = slash ? slash + 1 : rom;
     size_t parent_len = (size_t)(filename - rom);
-    _snwprintf(out, (size_t)outsz, L"%.*ls%s%s%s%s.sav",
-               (int)parent_len, rom, L"saves\\tamagotchi_", dev, L"\\", filename);
+    _snwprintf(out, (size_t)outsz, L"%.*ls%s%s%s%s%s%s",
+               (int)parent_len, rom, L"saves\\tamagotchi_", dev, L"\\", filename,
+               L"\\", L"save.sav");
     out[outsz - 1] = L'\0';
 }
 
@@ -2216,6 +2239,7 @@ static void do_play(void)
     int awake   = (IsDlgButtonChecked(g_main, IDC_AWAKE)   == BST_CHECKED);
     int buttons = (IsDlgButtonChecked(g_main, IDC_BUTTONS) == BST_CHECKED);
     int ontop   = (IsDlgButtonChecked(g_main, IDC_ONTOP)   == BST_CHECKED);
+    g_resume    = (IsDlgButtonChecked(g_main, IDC_RESUME)  == BST_CHECKED);
 
     /* Use the save file the player picked. Otherwise, let the emulator make
      * the normal folder beside the ROM. */
@@ -2227,6 +2251,8 @@ static void do_play(void)
     wchar_t wname[32];
     a2w(g_dev->name, wname, 32);
     at = wappend(cmd, CMDCAP, at, L" --device %s", wname);
+    at = wappend(cmd, CMDCAP, at, L" --persist-ram");
+    at = append_resume_flag(cmd, CMDCAP, at, g_resume);
     /* No --rtc-mult: the game clock is changed in the emulator with +/-. */
     if (awake)     at = wappend(cmd, CMDCAP, at, L" --stay-awake");
     if (!buttons)  at = wappend(cmd, CMDCAP, at, L" --no-buttons");
@@ -2395,6 +2421,8 @@ static void build_ui(void)
        LBLX + 100, OPTY + 1, 140, 20, IDC_BUTTONS);
     mk(L"BUTTON", L"Always on top", WS_TABSTOP | BS_AUTOCHECKBOX,
        LBLX + 250, OPTY + 1, 110, 20, IDC_ONTOP);
+    mk(L"BUTTON", L"Resume last session", WS_TABSTOP | BS_AUTOCHECKBOX,
+       LBLX + 370, OPTY + 1, 150, 20, IDC_RESUME);
     /* Stay awake defaults on so device sleep is not mistaken for a freeze. */
     CheckDlgButton(g_main, IDC_AWAKE, BST_CHECKED);
     /* Button visibility is a persistent preference. */
@@ -2403,6 +2431,10 @@ static void build_ui(void)
     /* Always-on-top is persistent and defaults off. */
     CheckDlgButton(g_main, IDC_ONTOP,
                    reg_get(REG_ONTOP, 0) ? BST_CHECKED : BST_UNCHECKED);
+    /* Resume by default; leave it unchecked to start cold. */
+    g_resume = reg_get(REG_RESUME, 1) ? 1 : 0;
+    CheckDlgButton(g_main, IDC_RESUME,
+                   g_resume ? BST_CHECKED : BST_UNCHECKED);
 
     /* Load bindings at startup; Play reads them even if Help was never opened. */
     load_keys();
@@ -2603,6 +2635,10 @@ static LRESULT CALLBACK wndproc(HWND hw, UINT msg, WPARAM wp, LPARAM lp)
             reg_set(REG_ONTOP,
                     IsDlgButtonChecked(g_main, IDC_ONTOP) == BST_CHECKED);
             return 0;
+        case IDC_RESUME:
+            g_resume = IsDlgButtonChecked(g_main, IDC_RESUME) == BST_CHECKED;
+            reg_set(REG_RESUME, g_resume);
+            return 0;
         }
         return 0;
     }
@@ -2715,6 +2751,10 @@ static LRESULT CALLBACK wndproc(HWND hw, UINT msg, WPARAM wp, LPARAM lp)
 int WINAPI WinMain(HINSTANCE hi, HINSTANCE prev, LPSTR cmdline, int show)
 {
     (void)prev; (void)cmdline;
+
+#ifdef LAUNCHER_DEBUG
+    launcher_debug_resume_check();
+#endif
 
     /* Select the default device before building its tabs. */
     g_dev = dlc_device_default();

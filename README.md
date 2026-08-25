@@ -48,6 +48,9 @@ Run two instances with DIFFERENT saves. They find each other automatically. Conn
 
 Saves are stored in a folder where the .bin was selected. They're titled after the device you're currently playing. If the folder doesn't exist yet, the emulator will create one on your behalf. 
 
+The  `.sav` file is the device's raw game-flash save. Sessions also write a `.sav.state` snapshots, which resumes the emulator session from when it was last closed.
+If this behavior is not wanted (ie, you want to restart instead) you can uncheck **Resume last session** to start from the OG save.
+
 ## Licence
 
 GPL-3.0 — see `LICENSE`.
