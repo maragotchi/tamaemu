@@ -435,6 +435,18 @@ typedef struct Emu {
     Link     auto_link_storage;
 } Emu;
 
+typedef enum StateResult {
+    STATE_NONE,
+    STATE_LOADED,
+    STATE_REJECTED,
+    STATE_IO_ERROR
+} StateResult;
+
+StateResult state_load(Emu *e, const char *savpath, const char *build_id,
+                       char *why, size_t whysz);
+int state_save(const Emu *e, const char *savpath, const char *build_id,
+               char *why, size_t whysz);
+
 /* mem.c */
 uint8_t  mem_read8 (Emu *e, uint32_t a);
 uint16_t mem_read16(Emu *e, uint32_t a);
@@ -446,6 +458,36 @@ void mem_write32(Emu *e, uint32_t a, uint32_t v);
 /* cpu.c */
 void cpu_reset(Emu *e);
 void cpu_step(Emu *e);         /* one instruction (ext prefixes folded in) */
+
+static inline bool state_session_eligible(bool interactive, bool linkrom,
+                                          bool net_host, bool net_join,
+                                          bool net_peer, bool no_state)
+{
+    return interactive && !linkrom && !net_host && !net_join && !net_peer && !no_state;
+}
+
+/* Anything but a successful load starts from a cold reset. */
+static inline StateResult state_restore_or_reset(Emu *e, const char *savpath,
+                                                  const char *build_id,
+                                                  bool eligible, bool restart,
+                                                  char *why, size_t whysz)
+{
+    StateResult result = STATE_NONE;
+    if (eligible && !restart)
+        result = state_load(e, savpath, build_id, why, whysz);
+    if (result != STATE_LOADED)
+        cpu_reset(e);
+    return result;
+}
+
+/* Don't snapshot a stopped core. Zero means skipped or failed, state_save supplies the error text when it failed. */
+static inline int state_save_on_exit(const Emu *e, const char *savpath,
+                                     const char *build_id, bool eligible,
+                                     char *why, size_t whysz)
+{
+    return eligible && e && !e->stopped && !e->link &&
+           state_save(e, savpath, build_id, why, whysz);
+}
 
 /* disasm.c */
 int disasm_one(Emu *e, uint32_t pc, char *out, size_t outsz); /* returns length in bytes consumed */

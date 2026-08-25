@@ -3,6 +3,7 @@
 #include "../tools/swapreq.h"
 #include <stdlib.h>
 #include <string.h>
+#include <stddef.h>
 #include <math.h>
 #include <sys/stat.h>
 #ifdef _WIN32
@@ -35,6 +36,253 @@ static Emu *fresh_dev(const DeviceProfile *dev)
 static Emu *fresh(void)
 {
     return fresh_dev(device_default());
+}
+
+typedef struct TestStateHeader {
+    char magic[8], build[32], device[32];
+    uint32_t version, emu_size, rom_size, flash_crc;
+} TestStateHeader;
+
+static void test_state_snapshot(void)
+{
+    const DeviceProfile *dev = device_default();
+    const char *path = "state_test.tmp";
+    const char *statepath = "state_test.tmp.state";
+    const char *build = "test-build";
+    Emu saved, restored;
+    char why[128];
+    FILE *f;
+
+    memset(&saved, 0, sizeof saved);
+    saved.dev = *dev;
+    saved.rom = malloc(dev->rom_size);
+    CHECK(saved.rom != NULL, "state fixture ROM allocated");
+    if (!saved.rom) return;
+    memset(saved.rom, 0xFF, dev->rom_size);
+    saved.pc = 0x0240A5B6u;
+    saved.cycles = 123456789u;
+    saved.a0ram[0x123] = 0xA0;
+    saved.ivram[0x234] = 0x1B;
+    saved.dstram[0x345] = 0xD5;
+    saved.lcd.gram[3][4] = 0x5A5A;
+    saved.t16[2].counter = 0x1234;
+    saved.t16[2].accum = 0x89ABCDEFu;
+    saved.tracef = (FILE *)(uintptr_t)1;
+    saved.lcd.logf = (FILE *)(uintptr_t)2;
+    saved.link = (Link *)(uintptr_t)3;
+    saved.nfc_peer = (Emu *)(uintptr_t)4;
+    saved.nfc_vpeer = (NfcPeer *)(uintptr_t)5;
+    memset(&saved.auto_link_storage, 0xA5, sizeof saved.auto_link_storage);
+    saved.auto_link = true;
+    CHECK(state_save(&saved, path, build, why, sizeof why) == 1,
+          "state snapshot written: %s", why);
+
+    memset(&restored, 0, sizeof restored);
+    restored.dev = *dev;
+    restored.rom = malloc(dev->rom_size);
+    CHECK(restored.rom != NULL, "state restore ROM allocated");
+    if (restored.rom) {
+        uint8_t *fresh_rom = restored.rom;
+        memset(fresh_rom, 0xFF, dev->rom_size);
+        CHECK(state_load(&restored, path, build, why, sizeof why) == STATE_LOADED,
+              "state snapshot restored: %s", why);
+        CHECK(restored.rom == fresh_rom && !memcmp(&restored.dev, dev, sizeof *dev),
+              "restore preserves fresh ROM pointer and device profile");
+        CHECK(restored.pc == 0x0240A5B6u && restored.cycles == 123456789u,
+              "CPU state restored: pc=%08x cycles=%llu", restored.pc,
+              (unsigned long long)restored.cycles);
+        CHECK(restored.a0ram[0x123] == 0xA0 && restored.ivram[0x234] == 0x1B &&
+              restored.dstram[0x345] == 0xD5, "A0/IV/DSR RAM restored");
+        CHECK(restored.lcd.gram[3][4] == 0x5A5A, "LCD RAM restored");
+        CHECK(restored.t16[2].counter == 0x1234 && restored.t16[2].accum == 0x89ABCDEFu,
+              "timer state restored");
+        CHECK(restored.tracef == NULL && restored.lcd.logf == NULL && restored.link == NULL &&
+              restored.nfc_peer == NULL && restored.nfc_vpeer == NULL && !restored.auto_link &&
+              !memcmp(&restored.auto_link_storage, &(Link){0}, sizeof(Link)),
+              "host resources re-seeded after restore");
+        free(restored.rom);
+    }
+
+    f = fopen(statepath, "wb");
+    if (f) { fputs("short", f); fclose(f); }
+    memset(&restored, 0, sizeof restored); restored.dev = *dev;
+    restored.rom = malloc(dev->rom_size);
+    if (restored.rom) {
+        uint8_t *fresh_rom = restored.rom;
+        CHECK(state_load(&restored, path, build, why, sizeof why) == STATE_REJECTED &&
+              restored.rom == fresh_rom && !memcmp(&restored.dev, dev, sizeof *dev),
+              "truncated state rejected without changing fresh setup: %s", why);
+        free(restored.rom);
+    }
+
+    CHECK(state_save(&saved, path, build, why, sizeof why) == 1, "state re-written");
+    f = fopen(statepath, "r+b");
+    if (f) { fputc('X', f); fclose(f); }
+    memset(&restored, 0, sizeof restored); restored.dev = *dev; restored.rom = malloc(dev->rom_size);
+    if (restored.rom) memset(restored.rom, 0xFF, dev->rom_size);
+    if (restored.rom) {
+        CHECK(state_load(&restored, path, build, why, sizeof why) == STATE_REJECTED &&
+              strstr(why, "magic") != NULL, "wrong magic rejected specifically: %s", why);
+        free(restored.rom);
+    }
+
+    CHECK(state_save(&saved, path, build, why, sizeof why) == 1, "state re-written");
+    f = fopen(statepath, "r+b");
+    if (f) { uint32_t bad = 99; fseek(f, (long)offsetof(TestStateHeader, version), SEEK_SET); fwrite(&bad, 1, sizeof bad, f); fclose(f); }
+    memset(&restored, 0, sizeof restored); restored.dev = *dev; restored.rom = malloc(dev->rom_size);
+    if (restored.rom) memset(restored.rom, 0xFF, dev->rom_size);
+    if (restored.rom) {
+        CHECK(state_load(&restored, path, build, why, sizeof why) == STATE_REJECTED &&
+              strstr(why, "version") != NULL, "wrong version rejected specifically: %s", why);
+        free(restored.rom);
+    }
+
+    CHECK(state_save(&saved, path, build, why, sizeof why) == 1, "state re-written");
+    f = fopen(statepath, "r+b");
+    if (f) { uint32_t bad = 1; fseek(f, (long)offsetof(TestStateHeader, emu_size), SEEK_SET); fwrite(&bad, 1, sizeof bad, f); fclose(f); }
+    memset(&restored, 0, sizeof restored); restored.dev = *dev; restored.rom = malloc(dev->rom_size);
+    if (restored.rom) memset(restored.rom, 0xFF, dev->rom_size);
+    if (restored.rom) {
+        CHECK(state_load(&restored, path, build, why, sizeof why) == STATE_REJECTED &&
+              strstr(why, "Emu size") != NULL, "wrong Emu size rejected specifically: %s", why);
+        free(restored.rom);
+    }
+
+    CHECK(state_save(&saved, path, build, why, sizeof why) == 1, "state re-written");
+    f = fopen(statepath, "r+b");
+    if (f) { uint32_t bad = 1; fseek(f, (long)offsetof(TestStateHeader, rom_size), SEEK_SET); fwrite(&bad, 1, sizeof bad, f); fclose(f); }
+    memset(&restored, 0, sizeof restored); restored.dev = *dev; restored.rom = malloc(dev->rom_size);
+    if (restored.rom) memset(restored.rom, 0xFF, dev->rom_size);
+    if (restored.rom) {
+        CHECK(state_load(&restored, path, build, why, sizeof why) == STATE_REJECTED &&
+              strstr(why, "ROM size") != NULL, "wrong ROM size rejected specifically: %s", why);
+        free(restored.rom);
+    }
+
+    CHECK(state_save(&saved, path, build, why, sizeof why) == 1, "state re-written");
+    f = fopen(statepath, "r+b");
+    if (f) { fseek(f, (long)offsetof(TestStateHeader, device), SEEK_SET); fputs("wrong-device", f); fclose(f); }
+    memset(&restored, 0, sizeof restored); restored.dev = *dev; restored.rom = malloc(dev->rom_size);
+    if (restored.rom) memset(restored.rom, 0xFF, dev->rom_size);
+    if (restored.rom) {
+        uint8_t *fresh_rom = restored.rom;
+        CHECK(state_load(&restored, path, build, why, sizeof why) == STATE_REJECTED && restored.rom == fresh_rom && !memcmp(&restored.dev, dev, sizeof *dev) && strstr(why, "device") != NULL, "wrong device rejected: %s", why);
+        free(restored.rom);
+    }
+
+    CHECK(state_save(&saved, path, build, why, sizeof why) == 1, "state re-written");
+    f = fopen(statepath, "r+b");
+    if (f) { fseek(f, (long)offsetof(TestStateHeader, build), SEEK_SET); fputs("wrong-build", f); fclose(f); }
+    memset(&restored, 0, sizeof restored); restored.dev = *dev; restored.rom = malloc(dev->rom_size);
+    if (restored.rom) memset(restored.rom, 0xFF, dev->rom_size);
+    if (restored.rom) {
+        uint8_t *fresh_rom = restored.rom;
+        CHECK(state_load(&restored, path, build, why, sizeof why) == STATE_REJECTED && restored.rom == fresh_rom && !memcmp(&restored.dev, dev, sizeof *dev) && strstr(why, "build") != NULL, "wrong build rejected: %s", why);
+        free(restored.rom);
+    }
+
+    CHECK(state_save(&saved, path, build, why, sizeof why) == 1, "state re-written");
+    saved.rom[0] ^= 1;
+    memset(&restored, 0, sizeof restored); restored.dev = *dev; restored.rom = malloc(dev->rom_size);
+    if (restored.rom) {
+        uint8_t *fresh_rom = restored.rom;
+        memcpy(fresh_rom, saved.rom, dev->rom_size);
+        CHECK(state_load(&restored, path, build, why, sizeof why) == STATE_REJECTED && restored.rom == fresh_rom && !memcmp(&restored.dev, dev, sizeof *dev) && strstr(why, "checksum") != NULL, "stale flash state rejected: %s", why);
+        free(restored.rom);
+    }
+    free(saved.rom);
+    remove(path);
+    remove(statepath);
+}
+
+static void test_state_lifecycle(void)
+{
+    const DeviceProfile *dev = device_default();
+    const char *path = "state_lifecycle_test.tmp";
+    const char *statepath = "state_lifecycle_test.tmp.state";
+    const char *build = "test-build";
+    Emu saved, restored;
+    char why[128];
+
+    memset(&saved, 0, sizeof saved);
+    saved.dev = *dev;
+    saved.rom = malloc(dev->rom_size);
+    CHECK(saved.rom != NULL, "lifecycle fixture ROM allocated");
+    if (!saved.rom) return;
+    memset(saved.rom, 0xFF, dev->rom_size);
+    saved.pc = 0x0240A5B6u;
+    saved.cycles = 123456789u;
+    CHECK(state_save(&saved, path, build, why, sizeof why) == 1,
+          "lifecycle state written: %s", why);
+
+    CHECK(state_session_eligible(true, false, false, false, false, false),
+          "interactive standalone session is state-eligible");
+    CHECK(!state_session_eligible(false, false, false, false, false, false) &&
+          !state_session_eligible(true, true, false, false, false, false) &&
+          !state_session_eligible(true, false, true, false, false, false) &&
+          !state_session_eligible(true, false, false, true, false, false) &&
+          !state_session_eligible(true, false, false, false, true, false) &&
+          !state_session_eligible(true, false, false, false, false, true),
+          "non-interactive, link/network, and --no-state sessions are ineligible");
+
+    memset(&restored, 0, sizeof restored);
+    restored.dev = *dev;
+    restored.rom = malloc(dev->rom_size);
+    if (restored.rom) {
+        memset(restored.rom, 0xFF, dev->rom_size);
+        CHECK(state_restore_or_reset(&restored, path, build, true, false, why, sizeof why) == STATE_LOADED &&
+              restored.pc == 0x0240A5B6u && restored.cycles == 123456789u,
+              "successful restore skips reset: pc=%08x cycles=%llu", restored.pc,
+              (unsigned long long)restored.cycles);
+        free(restored.rom);
+    }
+
+    memset(&restored, 0, sizeof restored);
+    restored.dev = *dev;
+    restored.rom = malloc(dev->rom_size);
+    if (restored.rom) {
+        memset(restored.rom, 0xFF, dev->rom_size);
+        CHECK(state_restore_or_reset(&restored, path, build, true, true, why, sizeof why) == STATE_NONE &&
+              restored.pc != 0x0240A5B6u,
+              "--restart skips restore and performs a cold reset");
+        CHECK(state_save_on_exit(&restored, path, build, true, why, sizeof why) == 1,
+              "--restart still permits state writing: %s", why);
+        free(restored.rom);
+    }
+
+    remove(statepath);
+    memset(&restored, 0, sizeof restored);
+    restored.dev = *dev;
+    restored.rom = malloc(dev->rom_size);
+    if (restored.rom) {
+        memset(restored.rom, 0xFF, dev->rom_size);
+        CHECK(state_restore_or_reset(&restored, path, build, false, false, why, sizeof why) == STATE_NONE &&
+              restored.pc != 0x0240A5B6u &&
+              state_save_on_exit(&restored, path, build, false, why, sizeof why) == 0,
+              "--no-state skips both restore and writing");
+        {
+            FILE *f = fopen(statepath, "rb");
+            CHECK(f == NULL, "--no-state leaves no state file");
+            if (f) fclose(f);
+        }
+        free(restored.rom);
+    }
+
+    saved.stopped = true;
+    CHECK(state_save_on_exit(&saved, path, build, true, why, sizeof why) == 0,
+          "faulted core skips state writing");
+    saved.stopped = false;
+    {
+        Link active_link;
+        memset(&active_link, 0, sizeof active_link);
+        saved.link = &active_link;
+        CHECK(state_save_on_exit(&saved, path, build, true, why, sizeof why) == 0,
+              "a live link skips state writing even after standalone startup");
+        saved.link = NULL;
+    }
+    free(saved.rom);
+    remove(path);
+    remove(statepath);
 }
 
 static void load_prog(Emu *e, uint32_t addr, const uint16_t *hws, int n)
@@ -1741,6 +1989,8 @@ static void test_keys_parse(void)
 
 int main(void)
 {
+    test_state_snapshot();
+    test_state_lifecycle();
     test_devices();
     test_dlc_device_rows();
     test_dlc_route_id();
