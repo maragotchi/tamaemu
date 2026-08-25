@@ -393,33 +393,60 @@ int link_peer(Link *l, int port)
     return link_host(l, port);
 }
 
-/* Auto-link joins an existing session or leaves a non-blocking listener open. */
+/* Auto-link first probes ownership with bind(), then either leaves a
+ * non-blocking listener open or starts a non-blocking connection to its hub. */
 int link_auto_begin(Link *l, int port)
 {
-    if (try_join(l, "127.0.0.1", port, 1)) return 1;
     wsa_init();
     uintptr_t ls = (uintptr_t)socket(AF_INET, SOCK_STREAM, 0);
     if (ls == (uintptr_t)INVALID_SOCKET) return 0;
-    int one = 1;
-    setsockopt((int)ls, SOL_SOCKET, SO_REUSEADDR, (const char *)&one, sizeof one);
     struct sockaddr_in a;
     memset(&a, 0, sizeof a);
     a.sin_family = AF_INET;
-    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);   /* never expose the listener remotely */
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     a.sin_port = htons((unsigned short)port);
-    if (bind((int)ls, (struct sockaddr *)&a, sizeof a) != 0
-        || listen((int)ls, LINK_PEERS_MAX) != 0) {
-        CLOSESOCK((int)ls);                        /* another listener won the race */
+    if (bind((int)ls, (struct sockaddr *)&a, sizeof a) == 0 &&
+        listen((int)ls, LINK_PEERS_MAX) == 0) {
+        sock_setup(ls);
+        l->listener = ls; l->listening = 1; l->hub = 1;
+        fprintf(stderr, "[link] connect mode - listening on 127.0.0.1:%d for another device\n", port);
         return 0;
     }
-    sock_setup(ls);
-    l->listener = ls; l->listening = 1; l->hub = 1;
-    fprintf(stderr, "[link] connect mode - listening on 127.0.0.1:%d for another device\n", port);
+    CLOSESOCK((int)ls);
+    uintptr_t s = (uintptr_t)socket(AF_INET, SOCK_STREAM, 0);
+    if (s == (uintptr_t)INVALID_SOCKET) return 0;
+    sock_setup(s);
+    connect((int)s, (struct sockaddr *)&a, sizeof a);
+    l->joiner = s; l->joining = 1; l->join_port = port;
     return 0;
 }
 
 int link_auto_poll(Link *l)
 {
+    if (l->joining) {
+        fd_set wf, ef;
+        FD_ZERO(&wf); FD_ZERO(&ef);
+        FD_SET((int)l->joiner, &wf);
+        FD_SET((int)l->joiner, &ef);
+        struct timeval tv = {0, 0};
+        if (select((int)l->joiner + 1, NULL, &wf, &ef, &tv) > 0) {
+            int err = 0;
+#ifdef _WIN32
+            int elen = sizeof err;
+#else
+            socklen_t elen = sizeof err;
+#endif
+            getsockopt((int)l->joiner, SOL_SOCKET, SO_ERROR, (char *)&err, &elen);
+            l->joining = 0;
+            if (err == 0 && FD_ISSET((int)l->joiner, &wf)) {
+                net_add_sock(l, l->joiner);
+                fprintf(stderr, "[link] connected to peer at 127.0.0.1:%d.\n", l->join_port);
+                return 1;
+            }
+            CLOSESOCK((int)l->joiner);
+        }
+        return 0;
+    }
     if (!l->listening) return 0;
     int before = l->nsock;
     net_accept_pending(l);
@@ -431,6 +458,7 @@ int link_auto_poll(Link *l)
 void link_close(Link *l)
 {
     if (l->listening) { CLOSESOCK((int)l->listener); l->listening = 0; }
+    if (l->joining) { CLOSESOCK((int)l->joiner); l->joining = 0; }
     for (int i = 0; i < l->nsock; i++) CLOSESOCK((int)l->peer[i]);
     l->nsock = 0; l->net = 0; l->hub = 0;
 }
@@ -470,7 +498,7 @@ void link_reset(Link *l)
     l->bytes_ab = l->bytes_ba = 0;
     l->overflows = 0;
     l->net = 0; l->listening = 0; l->hub = 0;
-    l->nsock = 0; l->listener = 0;
+    l->nsock = 0; l->listener = 0; l->joiner = 0; l->joining = 0; l->join_port = 0;
     for (int i = 0; i < LINK_PEERS_MAX; i++) { l->peer[i] = 0; l->part_n[i] = 0; }
     /* Process-local IDs distinguish collision sources without a handshake. */
     l->my_id = (uint32_t)(link_now_us() * 2654435761u) ^ (uint32_t)(uintptr_t)l;

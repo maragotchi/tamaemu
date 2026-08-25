@@ -745,22 +745,40 @@ static void autolink_tick(Emu *e)
 
     if (!in_ir) {
         /* Keep established links open across menu pauses. */
-        if (l->listening && !l->net) {
+        if ((l->listening || l->joining) && !l->net) {
             link_close(l);
             fprintf(stderr, "[link] no peer arrived - stopped listening.\n");
         }
         return;
     }
+
+    /* Poll the socket on real time, not emulated time. The 4U can run its
+     * low-power clock much faster than wall time after a resume, which would
+     * make us poll far too often. These timestamps stay outside Emu so a
+     * snapshot cannot bring an old host-time value back with it. */
+    uint64_t now_ms = link_now_us() / 1000;
+    static uint64_t poll_ms_last, begin_ms_last;
     if (e->link) {
         /* Hubs remain open for additional devices. */
-        if (l->hub && l->listening) link_auto_poll(l);
+        if (l->hub && l->listening &&
+            host_interval_due(now_ms, &poll_ms_last, 100))
+            link_auto_poll(l);
         return;
     }
-    if (l->listening) { if (link_auto_poll(l)) { e->link = l; e->core_id = 0; } return; }
-    if (e->emu_secs < e->auto_link_retry_at) return;
-    e->auto_link_retry_at = e->emu_secs + 0.5;
+    if (l->listening || l->joining) {
+        if (host_interval_due(now_ms, &poll_ms_last, 100) &&
+            link_auto_poll(l)) {
+            e->link = l;
+            e->core_id = 0;
+        }
+        return;
+    }
+    if (!host_interval_due(now_ms, &begin_ms_last, 500)) return;
     link_reset(l);
-    if (link_auto_begin(l, e->auto_link_port)) { e->link = l; e->core_id = 0; }
+    if (link_auto_begin(l, e->auto_link_port)) {
+        e->link = l;
+        e->core_id = 0;
+    }
 }
 
 /* GPIO IR sends little-endian {gap_us u16, mark_us u16} events. The 150 us

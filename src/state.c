@@ -6,6 +6,10 @@
 #include <errno.h>
 #ifdef _WIN32
 #include <windows.h>
+#else
+#include <fcntl.h>
+#include <sys/file.h>
+#include <unistd.h>
 #endif
 
 #define STATE_MAGIC "TAMASTAT"
@@ -54,6 +58,49 @@ static int state_name(char dst[32], const char *src)
     memset(dst, 0, 32);
     if (n) memcpy(dst, src, n);
     return 1;
+}
+
+/* A save belongs to one Tamagotchi. Lock it while this window is open so a
+ * second window cannot share its identity or overwrite its save/state files.
+ * On Windows, the lock file disappears automatically if the emulator crashes. */
+int state_sav_lock_acquire(const char *savpath, uintptr_t *token,
+                           char *why, size_t whysz)
+{
+    char path[1024];
+    if (!token || !state_path(path, sizeof path, savpath, ".lock", why, whysz))
+        return 0;
+    *token = 0;
+#ifdef _WIN32
+    HANDLE h = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                           FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE,
+                           NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        state_why(why, whysz, "Another emulator instance is using\n%s", savpath);
+        return 0;
+    }
+    *token = (uintptr_t)h;
+#else
+    int fd = open(path, O_CREAT | O_RDWR, 0644);
+    if (fd < 0 || flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        if (fd >= 0) close(fd);
+        state_why(why, whysz, "Another emulator instance is using\n%s", savpath);
+        return 0;
+    }
+    *token = (uintptr_t)(fd + 1);
+#endif
+    state_why(why, whysz, "locked");
+    return 1;
+}
+
+void state_sav_lock_release(uintptr_t *token)
+{
+    if (!token || !*token) return;
+#ifdef _WIN32
+    CloseHandle((HANDLE)*token);
+#else
+    close((int)(*token - 1));
+#endif
+    *token = 0;
 }
 
 StateResult state_load(Emu *e, const char *savpath, const char *build_id,
@@ -122,7 +169,12 @@ StateResult state_load(Emu *e, const char *savpath, const char *build_id,
         bool btn_log = e->btn_log, nfc_log = e->nfc_log, nfc_log_rf = e->nfc_log_rf;
         bool auto_touch = e->auto_touch, ir_fast = e->ir_fast;
         bool lcd_log = e->lcd.log;
+        bool auto_link = e->auto_link;
         int rtc_mult = e->rtc_mult, touch_type = e->touch_type, auto_link_port = e->auto_link_port;
+        Link *link = e->link;
+        Emu *nfc_peer = e->nfc_peer;
+        NfcPeer *nfc_vpeer = e->nfc_vpeer;
+        Link auto_link_storage = e->auto_link_storage;
         uint32_t watch_lo = e->watch_lo, watch_hi = e->watch_hi, fwatch_lo = e->fwatch_lo, fwatch_hi = e->fwatch_hi;
         int rwatch_n = e->rwatch_n, rwatch_budget = e->rwatch_budget, fwatch_budget = e->fwatch_budget;
         uint32_t rwatch_lo[4], rwatch_hi[4];
@@ -141,7 +193,9 @@ StateResult state_load(Emu *e, const char *savpath, const char *build_id,
         e->btn_log = btn_log; e->nfc_log = nfc_log; e->nfc_log_rf = nfc_log_rf;
         e->auto_touch = auto_touch; e->ir_fast = ir_fast; e->rtc_mult = rtc_mult;
         e->lcd.log = lcd_log;
-        e->touch_type = touch_type; e->auto_link_port = auto_link_port;
+        e->touch_type = touch_type; e->auto_link = auto_link; e->auto_link_port = auto_link_port;
+        e->link = link; e->nfc_peer = nfc_peer; e->nfc_vpeer = nfc_vpeer;
+        e->auto_link_storage = auto_link_storage;
         e->watch_lo = watch_lo; e->watch_hi = watch_hi; e->fwatch_lo = fwatch_lo; e->fwatch_hi = fwatch_hi;
         e->rwatch_n = rwatch_n; e->rwatch_budget = rwatch_budget; e->fwatch_budget = fwatch_budget;
         memcpy(e->rwatch_lo, rwatch_lo, sizeof rwatch_lo); memcpy(e->rwatch_hi, rwatch_hi, sizeof rwatch_hi);
@@ -152,11 +206,6 @@ StateResult state_load(Emu *e, const char *savpath, const char *build_id,
     }
     e->tracef = NULL;
     e->lcd.logf = NULL;
-    e->link = NULL;
-    e->nfc_peer = NULL;
-    e->nfc_vpeer = NULL;
-    memset(&e->auto_link_storage, 0, sizeof e->auto_link_storage);
-    e->auto_link = false;
     state_why(why, whysz, "loaded");
     return STATE_LOADED;
 }

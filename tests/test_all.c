@@ -43,6 +43,23 @@ typedef struct TestStateHeader {
     uint32_t version, emu_size, rom_size, flash_crc;
 } TestStateHeader;
 
+static void test_state_save_lock(void)
+{
+    const char *path = "state_lock_test.tmp";
+    char why[128];
+    uintptr_t first = 0, second = 0;
+
+    CHECK(state_sav_lock_acquire(path, &first, why, sizeof why) == 1 && first != 0,
+          "first window acquires its save lock: %s", why);
+    CHECK(state_sav_lock_acquire(path, &second, why, sizeof why) == 0 && second == 0,
+          "second window is refused while that save is in use: %s", why);
+    state_sav_lock_release(&first);
+    CHECK(state_sav_lock_acquire(path, &second, why, sizeof why) == 1 && second != 0,
+          "save lock is available after the first window closes: %s", why);
+    state_sav_lock_release(&second);
+    remove("state_lock_test.tmp.lock");
+}
+
 static void test_state_snapshot(void)
 {
     const DeviceProfile *dev = device_default();
@@ -80,6 +97,7 @@ static void test_state_snapshot(void)
     memset(&restored, 0, sizeof restored);
     restored.dev = *dev;
     restored.rom = malloc(dev->rom_size);
+    restored.auto_link = true;  /* the new launcher sets this before loading */
     CHECK(restored.rom != NULL, "state restore ROM allocated");
     if (restored.rom) {
         uint8_t *fresh_rom = restored.rom;
@@ -97,9 +115,9 @@ static void test_state_snapshot(void)
         CHECK(restored.t16[2].counter == 0x1234 && restored.t16[2].accum == 0x89ABCDEFu,
               "timer state restored");
         CHECK(restored.tracef == NULL && restored.lcd.logf == NULL && restored.link == NULL &&
-              restored.nfc_peer == NULL && restored.nfc_vpeer == NULL && !restored.auto_link &&
+              restored.nfc_peer == NULL && restored.nfc_vpeer == NULL && restored.auto_link &&
               !memcmp(&restored.auto_link_storage, &(Link){0}, sizeof(Link)),
-              "host resources re-seeded after restore");
+              "host resources are re-seeded while fresh auto-link configuration survives restore");
         free(restored.rom);
     }
 
@@ -276,8 +294,8 @@ static void test_state_lifecycle(void)
         Link active_link;
         memset(&active_link, 0, sizeof active_link);
         saved.link = &active_link;
-        CHECK(state_save_on_exit(&saved, path, build, true, why, sizeof why) == 0,
-              "a live link skips state writing even after standalone startup");
+        CHECK(state_save_on_exit(&saved, path, build, true, why, sizeof why) == 1,
+              "a live auto-link session writes a restart-safe snapshot: %s", why);
         saved.link = NULL;
     }
     free(saved.rom);
@@ -614,6 +632,35 @@ static void test_link_hub_relay(void)
           (unsigned long long)link_send_fails(&g1));
 
     link_close(&g1); link_close(&g2); link_close(&g3); link_close(&hub);
+}
+
+/* The UI loop must not wait for connect(). With a listener already open, the
+ * joiner starts connecting and link_auto_poll() finishes the job. */
+static void test_link_auto_join(void)
+{
+    const int port = 47882;
+    static Link hub, joiner;
+    link_reset(&hub); link_reset(&joiner);
+    if (link_auto_begin(&hub, port) || !hub.listening) {
+        fprintf(stderr, "[test] port %d unavailable - skipping auto join test\n", port);
+        return;
+    }
+
+    CHECK(link_auto_begin(&joiner, port) == 0,
+          "auto-join starts without reporting a synchronous connection");
+    CHECK(joiner.joining && !joiner.listening && !joiner.net,
+          "joining side has an in-flight socket, not a blocking connection");
+
+    uint64_t deadline = link_now_us() + 1000000;
+    while ((!joiner.net || hub.nsock != 1) && link_now_us() < deadline) {
+        link_auto_poll(&hub);
+        link_auto_poll(&joiner);
+    }
+    CHECK(joiner.net && hub.nsock == 1,
+          "auto-join connects through polling (joiner=%d hub sockets=%d)",
+          joiner.net, hub.nsock);
+
+    link_close(&joiner); link_close(&hub);
 }
 
 /* Explicit timestamps test collision policy without depending on scheduling. */
@@ -1059,6 +1106,25 @@ static void test_device_table(void)
                   "shows whether the profile is read or ignored", n);
     CHECK(device_find("no-such-device") == NULL, "unknown device is rejected");
     CHECK(!strcmp(device_default()->name, "ps"), "the default machine is the P's");
+
+    const DeviceProfile *nfc = device_find("4u"), *ir = device_find("ps");
+    CHECK(nfc && ir, "NFC and IR profiles are available for port selection");
+    if (nfc && ir) {
+        CHECK(auto_link_default_port(nfc, 7878, false) == 7879,
+              "NFC auto-link defaults one port above the IR bus");
+        CHECK(auto_link_default_port(ir, 7878, false) == 7878,
+              "IR auto-link retains its existing port");
+        CHECK(auto_link_default_port(nfc, 9010, true) == 9010,
+              "an explicit NFC port is not remapped");
+    }
+
+    uint64_t last_poll = 1000;
+    CHECK(!host_interval_due(1099, &last_poll, 100),
+          "host poll stays quiet before its interval expires");
+    CHECK(host_interval_due(1100, &last_poll, 100) && last_poll == 1100,
+          "host poll becomes due at its interval and advances its timestamp");
+    CHECK(!host_interval_due(1100, &last_poll, 100),
+          "a second poll in the same host millisecond is suppressed");
 }
 
 /* Session state may be absolute or reached through a profile context pointer. */
@@ -1989,6 +2055,7 @@ static void test_keys_parse(void)
 
 int main(void)
 {
+    test_state_save_lock();
     test_state_snapshot();
     test_state_lifecycle();
     test_devices();
@@ -2008,6 +2075,7 @@ int main(void)
     test_nfcpeer();
     test_link();
     test_link_hub_relay();
+    test_link_auto_join();
     test_link_collision();
     test_link_wire_time();
     test_ir_rx_wire_time();

@@ -224,6 +224,11 @@ typedef struct Link {
     int       nsock;                 /* how many of peer[] are connected */
     uintptr_t listener;              /* pending listening socket (hub/auto-link) */
     int       listening;
+    /* Auto-link joins an existing hub asynchronously so the SDL loop never
+     * waits in connect(). link_auto_poll resolves this socket. */
+    uintptr_t joiner;
+    int       joining;
+    int       join_port;
     /* ---- collision model (socket mode only) ----
      * Sender IDs and host-time intervals let receivers corrupt overlapping IR
      * transmissions that TCP would otherwise deliver cleanly. */
@@ -442,10 +447,34 @@ typedef enum StateResult {
     STATE_IO_ERROR
 } StateResult;
 
+/* NFC and IR traffic use the same socket transport but incompatible wire
+ * protocols. Keep their automatic rendezvous ports separate; an explicit
+ * --ir-port always wins. */
+static inline int auto_link_default_port(const DeviceProfile *dev, int port,
+                                         bool port_set)
+{
+    return !port_set && dev && dev->nfc_pn512 ? port + 1 : port;
+}
+
+/* Network polling belongs to host time. The state snapshot intentionally does
+ * not carry this timestamp across launches. */
+static inline bool host_interval_due(uint64_t now_ms, uint64_t *last_ms,
+                                     uint64_t interval_ms)
+{
+    if (!*last_ms || now_ms - *last_ms >= interval_ms) {
+        *last_ms = now_ms;
+        return true;
+    }
+    return false;
+}
+
 StateResult state_load(Emu *e, const char *savpath, const char *build_id,
                        char *why, size_t whysz);
 int state_save(const Emu *e, const char *savpath, const char *build_id,
                char *why, size_t whysz);
+int state_sav_lock_acquire(const char *savpath, uintptr_t *token,
+                           char *why, size_t whysz);
+void state_sav_lock_release(uintptr_t *token);
 
 /* mem.c */
 uint8_t  mem_read8 (Emu *e, uint32_t a);
@@ -485,7 +514,7 @@ static inline int state_save_on_exit(const Emu *e, const char *savpath,
                                      const char *build_id, bool eligible,
                                      char *why, size_t whysz)
 {
-    return eligible && e && !e->stopped && !e->link &&
+    return eligible && e && !e->stopped &&
            state_save(e, savpath, build_id, why, whysz);
 }
 

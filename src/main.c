@@ -390,7 +390,7 @@ int main(int argc, char **argv)
     bool persist_ram = false;
     const char *linkrom = NULL, *savb = NULL, *net_join = NULL, *devb_name = NULL;
     int net_host = 0, net_peer = 0, auto_port = 7878;
-    bool no_auto_link = false;
+    bool no_auto_link = false, port_set = false;
     bool restart = false, no_state = false, state_resumed = false, state_smoke = false;
     uint64_t max_cycles = 0;              /* 0 = default per mode, set below */
     double max_wall = 0, snap_secs = 0;
@@ -441,7 +441,10 @@ int main(int argc, char **argv)
                                                         ? atoi(argv[++i]) : 7878;
         else if (!strcmp(argv[i], "--join") && i + 1 < argc) net_join = argv[++i];
         else if (!strcmp(argv[i], "--no-auto-link")) no_auto_link = true;
-        else if (!strcmp(argv[i], "--ir-port") && i + 1 < argc) auto_port = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--ir-port") && i + 1 < argc) {
+            auto_port = atoi(argv[++i]);
+            port_set = true;
+        }
         else if (!strcmp(argv[i], "--peer")) net_peer = (i + 1 < argc && argv[i+1][0] != '-')
                                                         ? atoi(argv[++i]) : 7878;
         else if (!strcmp(argv[i], "--sav-b") && i + 1 < argc) savb = argv[++i];
@@ -587,6 +590,20 @@ int main(int argc, char **argv)
             fprintf(stderr, "[flash] cannot create save folder for %s\n", rompath);
         savpath = savpath_buf;
     }
+    {
+        uintptr_t sav_lock = 0;
+        char lock_why[1200];
+        if (!state_sav_lock_acquire(savpath, &sav_lock, lock_why, sizeof lock_why)) {
+            fprintf(stderr, "[sav] refusing: %s\n", lock_why);
+#ifdef USE_SDL
+            if (!headless)
+                SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "tamaemu", lock_why, NULL);
+#endif
+            return 1;
+        }
+        /* Deliberately retain sav_lock until process exit. FILE_FLAG_DELETE_ON_CLOSE
+         * removes the Windows sidecar even if this process crashes. */
+    }
     FILE *sf = fopen(savpath, "rb");
     if (sf) {
         size_t sn = fread(e.rom, 1, e.dev.rom_size, sf);
@@ -708,7 +725,7 @@ int main(int argc, char **argv)
     /* Auto-link follows the firmware's connect-mode state. */
     if (!linkrom && !net_host && !net_join && !net_peer) {
         e.auto_link = !no_auto_link;
-        e.auto_link_port = auto_port;
+        e.auto_link_port = auto_link_default_port(&e.dev, auto_port, port_set);
     }
 
     /* --host/--join runs one core over the socket transport. */
