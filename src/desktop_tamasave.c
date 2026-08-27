@@ -123,7 +123,7 @@ static int read_metadata(const char *savpath, TamaSave *meta,
     if (fclose(f) != 0) valid = 0;
     if (!valid || memcmp(wire, "TAMAMETA", 8) || wire[8] != 1 || wire[9] ||
         wire[10] || wire[11]) {
-        desktop_why(why, whysz, "invalid in-progress save metadata for %s", savpath);
+        desktop_why(why, whysz, "invalid cross save metadata for %s", savpath);
         return -1;
     }
     memset(meta, 0, sizeof *meta);
@@ -172,7 +172,7 @@ int desktop_export_tamasave(const char *savpath, const char *out,
             save.revision = previous.revision;
         } else new_lineage(save.lineage);
         if (save.revision == UINT64_MAX) {
-            desktop_why(why, whysz, "in-progress save revision is exhausted"); goto done;
+            desktop_why(why, whysz, "cross save revision is exhausted"); goto done;
         }
         save.revision++;
         save.saved_utc_ms = (uint64_t)time(NULL) * 1000;
@@ -236,7 +236,7 @@ int desktop_import_tamasave(const char *in, const char *savpath,
         if (had_metadata && !memcmp(current.lineage, save.lineage, sizeof save.lineage) &&
             save.revision <= current.revision && !force) {
             desktop_why(why, whysz,
-                        "incoming in-progress save revision is not newer; use --force-tamasave-import to replace it");
+                        "incoming cross save revision is not newer; use --force-tamasave-import to replace it");
             goto done;
         }
     }

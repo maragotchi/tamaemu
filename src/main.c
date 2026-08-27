@@ -148,11 +148,10 @@ static void usage(void)
       "        [--stay-awake starts it on: screen never sleeps, tama keeps animating]\n"
       "        [--on-top  keep the window above other windows]\n"
       "        [--persist-ram  keep A0RAM in <sav>.ram so the tama survives a restart]\n"
-      "        [--import-tamasave file  replace this save from an in-progress save]\n"
-      "        [--import-only  import the in-progress save, then exit without starting the game]\n"
-      "        [--force-tamasave-import  allow an older/equal in-progress save to replace this save]\n"
-      "        [--export-tamasave file  write an in-progress save on exit]\n"
-      "        [--update-handoff-on-exit  update <sav>.tamasave on exit]\n"
+      "        [--import-tamasave file  replace this save from a cross save (.tamasave)]\n"
+      "        [--import-only  import the cross save, then exit without starting the game]\n"
+      "        [--force-tamasave-import  allow an older/equal cross save to replace this save]\n"
+      "        [--export-tamasave file  write a cross save (.tamasave) on exit]\n"
       "        [--restart  cold boot, ignoring any saved machine snapshot]\n"
       "        [--no-state  do not load or write a machine snapshot]\n");
     exit(1);
@@ -1515,9 +1514,9 @@ int main(int argc, char **argv)
         }
         if (desktop_export_tamasave(savpath, handoff, e.dev.name,
                                     handoff_why, sizeof handoff_why))
-            fprintf(stderr, "[tamasave] in-progress save -> %s\n", handoff);
+            fprintf(stderr, "[tamasave] cross save -> %s\n", handoff);
         else
-            fprintf(stderr, "[tamasave] cannot write in-progress save: %s\n", handoff_why);
+            fprintf(stderr, "[tamasave] cannot write cross save: %s\n", handoff_why);
     }
     fprintf(stderr, "[end] piezo tone events (T0): %u\n", e.tone_ev_w);
     fprintf(stderr, "[end] cycles=%llu pc=%08x stopped=%d halted=%d wall=%.1fs\n",

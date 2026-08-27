@@ -2545,7 +2545,7 @@ static void build_ui(void)
     mk(L"BUTTON", L"Resume last session", WS_TABSTOP | BS_AUTOCHECKBOX,
        LBLX + 370, OPTY + 1, 150, 20, IDC_RESUME);
     /* Only update the in-progress save on exit when the player has asked for it. */
-    mk(L"BUTTON", L"Update in-progress save on exit", WS_TABSTOP | BS_AUTOCHECKBOX,
+    mk(L"BUTTON", L"Update cross save on exit", WS_TABSTOP | BS_AUTOCHECKBOX,
        LBLX + 530, OPTY + 1, 210, 20, IDC_UPDATE_HANDOFF);
     /* Stay awake defaults on so device sleep is not mistaken for a freeze. */
     CheckDlgButton(g_main, IDC_AWAKE, BST_CHECKED);
@@ -2725,9 +2725,9 @@ static LRESULT CALLBACK wndproc(HWND hw, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_SAV_BR: {
             wchar_t sav[MAX_PATH];
             savepath(sav, MAX_PATH);
-            if (pick_file(L"Select a save (.sav) or in-progress save (.tamasave)",
-                          L"Saves and in-progress saves (*.sav;*.tamasave)\0*.sav;*.tamasave\0"
-                          L"Save files (*.sav)\0*.sav\0In-progress saves (*.tamasave)\0*.tamasave\0"
+            if (pick_file(L"Select a save (.sav) or cross save (.tamasave)",
+                          L"Saves and cross saves (*.sav;*.tamasave)\0*.sav;*.tamasave\0"
+                          L"Save files (*.sav)\0*.sav\0Cross saves (*.tamasave)\0*.tamasave\0"
                           L"All files\0*.*\0",
                           sav, MAX_PATH)) {
                 if (is_tamasave_path(sav)) {
@@ -2741,8 +2741,8 @@ static LRESULT CALLBACK wndproc(HWND hw, UINT msg, WPARAM wp, LPARAM lp)
                     g_save_follows_rom = 0;
                     refresh_status();
                     refresh_devnote();
-                    say(MB_ICONINFORMATION, L"In-progress save imported",
-                        L"Imported the in-progress save into:\n%s", dest);
+                    say(MB_ICONINFORMATION, L"Cross save imported",
+                        L"Imported the cross save into:\n%s", dest);
                     return 0;
                 }
                 set_text(IDC_SAV, sav);
