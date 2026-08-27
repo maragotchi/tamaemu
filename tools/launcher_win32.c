@@ -4,6 +4,7 @@
 #include <windows.h>
 #include <commctrl.h>
 #include <commdlg.h>
+#include <shellapi.h>
 #include <shlobj.h>
 #include <stdarg.h>
 #include <assert.h>
@@ -12,6 +13,7 @@
 #include <string.h>
 
 #include "dlc.h"
+#include "launcher_crosssave.h"
 #include "logcap.h"
 #include "swapreq.h"
 
@@ -47,6 +49,7 @@ int  WINAPI GdipCreateBitmapFromScan0(INT w, INT h, INT stride, INT format,
 #define EMU_LOG   L"emu_run.log"
 #define LOG_DIR   L"logs"
 #define LIB_DIR   L"tamagotchi_dlc"
+#define IDM_IMPORT_CROSS_SAVE 40001
 
 enum {
     IDC_ROM = 1001, IDC_ROM_BR, IDC_SAV, IDC_SAV_BR, IDC_SAV_MATCH,
@@ -57,8 +60,7 @@ enum {
     IDC_ONTOP,
     IDC_KEY_A, IDC_KEY_B, IDC_KEY_C, /* appended; consecutive - code does IDC_KEY_A + i */
     IDC_HELP_AGAIN,
-    IDC_RESUME,
-    IDC_UPDATE_HANDOFF
+    IDC_RESUME
 };
 
 /* Button glyphs use the system UI font. U+1F4C1 needs a UTF-16 surrogate pair. */
@@ -73,7 +75,6 @@ enum {
 #define REG_BUTTONS L"ShowButtons"
 #define REG_ONTOP   L"AlwaysOnTop"
 #define REG_RESUME  L"ResumeLastSession"
-#define REG_UPDATE_HANDOFF L"UpdateHandoffOnExit"
 #define REG_KEYS    L"Keys"
 
 /* Layout uses 96-DPI units and right-anchored rows; S() scales at startup. */
@@ -126,8 +127,8 @@ static unsigned char *g_checked;           /* parallel to g_items */
 static int       g_populating;             /* suppress LVN_ITEMCHANGED echo */
 static int       g_save_follows_rom = 1;
 static int       g_resume = 1;
-static int       g_update_handoff;
 static wchar_t   g_devnote[160];           /* "Save looks like ...", or "" */
+static wchar_t   g_crosssave_status[MAX_PATH + 96];
 static int       g_tab_has_sets;           /* the visible tab shows a "[n]" tile */
 static HIMAGELIST g_imgs;                  /* the visible tab's thumbnails */
 static ULONG_PTR  g_gdip;
@@ -208,7 +209,7 @@ static void launcher_debug_resume_check(void)
 }
 #endif
 
-static void say(UINT icon, const wchar_t *title, const wchar_t *fmt, ...)
+static int say(UINT icon, const wchar_t *title, const wchar_t *fmt, ...)
 {
     wchar_t buf[2048];
     va_list ap;
@@ -216,7 +217,7 @@ static void say(UINT icon, const wchar_t *title, const wchar_t *fmt, ...)
     _vsnwprintf(buf, sizeof buf / sizeof buf[0] - 1, fmt, ap);
     va_end(ap);
     buf[sizeof buf / sizeof buf[0] - 1] = L'\0';
-    MessageBoxW(g_main, buf, title, MB_OK | icon);
+    return MessageBoxW(g_main, buf, title, MB_OK | icon);
 }
 
 #define EMU_LOG_LIMIT (2ULL * 1024ULL * 1024ULL)
@@ -721,7 +722,7 @@ static int pick_save_destination(wchar_t *path, int pathsz)
     ofn.lpstrFilter = L"Save files (*.sav)\0*.sav\0All files\0*.*\0";
     ofn.lpstrFile   = buf;
     ofn.nMaxFile    = MAX_PATH;
-    ofn.lpstrTitle  = L"Choose where to import this session";
+    ofn.lpstrTitle  = L"Import cross save";
     ofn.lpstrDefExt = L"sav";
     ofn.Flags       = OFN_PATHMUSTEXIST | OFN_EXPLORER | OFN_NOCHANGEDIR
                     | OFN_OVERWRITEPROMPT;
@@ -1730,6 +1731,7 @@ static void refresh_devnote(void)
 
 static void on_rom_changed(void)
 {
+    g_crosssave_status[0] = L'\0';
     if (g_save_follows_rom) {
         wchar_t sav[MAX_PATH + 64];
         default_savepath(sav, MAX_PATH + 64);
@@ -1746,8 +1748,35 @@ static void on_save_edited(void)
     savepath(sav, MAX_PATH + 64);
     default_savepath(want, MAX_PATH + 64);
     g_save_follows_rom = (wcscmp(sav, want) == 0);
+    g_crosssave_status[0] = L'\0';
     refresh_status();
     refresh_devnote();
+}
+
+/* Keep programmatic device changes on the same remembered-ROM path as a tab click. */
+static int select_device(const DlcDevice *device)
+{
+    int index;
+    wchar_t lib[MAX_PATH], rom[MAX_PATH];
+
+    if (!device) return 0;
+    for (index = 0; index < dlc_device_count(); index++)
+        if (dlc_device_at(index) == device) break;
+    if (index == dlc_device_count()) return 0;
+    TabCtrl_SetCurSel(g_devtabs, index);
+    if (device != g_dev) {
+        g_dev = device;
+        default_lib(g_dev, lib, MAX_PATH);
+        set_text(IDC_LIB, lib);
+        refresh_device_ui();
+    }
+    /* A cross save always resolves the selected device's remembered ROM,
+     * including when that device was already the visible tab. */
+    default_rom(g_dev, rom, MAX_PATH);
+    set_text(IDC_ROM, rom);
+    g_save_follows_rom = 1;
+    on_rom_changed();
+    return 1;
 }
 
 static int require_save(wchar_t *sav, int savsz)
@@ -2247,7 +2276,7 @@ static int do_install(void)
 
 /* Run imports in their own emulator process. It holds the destination lock
  * while replacing the save, then exits before the real play session starts. */
-static int import_tamasave(const wchar_t *source, const wchar_t *dest)
+static int import_tamasave(const wchar_t *source, const wchar_t *dest, int force)
 {
     wchar_t emu[MAX_PATH], rom[MAX_PATH], cmd[MAX_PATH * 4 + 256], wdev[32];
     char output[8192];
@@ -2272,15 +2301,18 @@ static int import_tamasave(const wchar_t *source, const wchar_t *dest)
 
     a2w(g_dev->name, wdev, 32);
     wappend(cmd, (int)(sizeof cmd / sizeof cmd[0]), 0,
-            L"\"%s\" \"%s\" --sav \"%s\" --device %s --persist-ram"
+            L"\"%s\" \"%s\" --sav \"%s\" --device %s"
             L" --import-tamasave \"%s\" --import-only",
             emu, rom, dest, wdev, source);
+    if (force)
+        wappend(cmd, (int)(sizeof cmd / sizeof cmd[0]), wcslen(cmd),
+                L" --force-tamasave-import");
 
     sa.nLength = sizeof sa;
     sa.lpSecurityDescriptor = NULL;
     sa.bInheritHandle = TRUE;
     if (!CreatePipe(&read_pipe, &write_pipe, &sa, 0)) {
-        say(MB_ICONERROR, L"Could not import this session",
+        say(MB_ICONERROR, L"Could not import this cross save",
             L"Could not capture the emulator's import result (error %lu).", GetLastError());
         return 0;
     }
@@ -2303,7 +2335,7 @@ static int import_tamasave(const wchar_t *source, const wchar_t *dest)
         CloseHandle(read_pipe);
         CloseHandle(write_pipe);
         if (hnul != INVALID_HANDLE_VALUE) CloseHandle(hnul);
-        say(MB_ICONERROR, L"Could not import this session",
+        say(MB_ICONERROR, L"Could not import this cross save",
             L"Could not start the emulator (error %lu).", gle);
         return 0;
     }
@@ -2326,9 +2358,108 @@ static int import_tamasave(const wchar_t *source, const wchar_t *dest)
             _snwprintf(why, sizeof why / sizeof why[0],
                        L"The emulator refused the import (exit code %lu).", exit_code);
         why[sizeof why / sizeof why[0] - 1] = L'\0';
-        say(MB_ICONERROR, L"Could not import this session", L"%s", why);
+        say(MB_ICONERROR, L"Could not import this cross save", L"%s", why);
         return 0;
     }
+    return 1;
+}
+
+static int make_save_parent(const wchar_t *sav)
+{
+    wchar_t parent[MAX_PATH * 4], *slash;
+    int result;
+    wcsncpy(parent, sav, sizeof parent / sizeof parent[0] - 1);
+    parent[sizeof parent / sizeof parent[0] - 1] = L'\0';
+    slash = wcsrchr(parent, L'\\');
+    if (!slash) slash = wcsrchr(parent, L'/');
+    if (!slash) return 0;
+    *slash = L'\0';
+    result = SHCreateDirectoryExW(g_main, parent, NULL);
+    return result == ERROR_SUCCESS || result == ERROR_FILE_EXISTS ||
+           result == ERROR_ALREADY_EXISTS;
+}
+
+static int confirm_stale_crosssave(const wchar_t *dest)
+{
+    return say(MB_ICONWARNING | MB_YESNO, L"Cross save is not newer",
+               L"This cross save is the same age or older than the one already at:\n%s\n\n"
+               L"Replace it anyway?", dest) == IDYES;
+}
+
+static void show_crosssave_status(const wchar_t *dest)
+{
+    _snwprintf(g_crosssave_status, sizeof g_crosssave_status / sizeof g_crosssave_status[0],
+               L"Playing from %s — the cross save stays updated beside it.", dest);
+    g_crosssave_status[sizeof g_crosssave_status / sizeof g_crosssave_status[0] - 1] = L'\0';
+    SetWindowTextW(g_status, g_crosssave_status);
+}
+
+/* The Save/drop/open path is deterministic first. Only an identity collision
+ * earns a sibling name; re-importing one pet must converge on its own save. */
+static int open_crosssave(const wchar_t *source, int choose_destination)
+{
+    CrossSaveIdentity incoming;
+    CrossSaveRoute route;
+    const DlcDevice *device;
+    wchar_t dest[MAX_PATH * 4], why[256];
+    int force = 0;
+
+    /* A working save's own companion is already in place. Selecting it is a
+     * request to play that save, never a request to import a nested copy. */
+    if (!choose_destination && crosssave_working_sibling(source, dest,
+                                                          sizeof dest / sizeof dest[0])) {
+        set_text(IDC_SAV, dest);
+        g_save_follows_rom = 0;
+        refresh_status();
+        refresh_devnote();
+        return 1;
+    }
+    if (!crosssave_read_identity(source, &incoming, why, sizeof why)) {
+        say(MB_ICONERROR, L"Could not import this cross save", L"%s", why);
+        return 0;
+    }
+    device = dlc_device_find(incoming.device);
+    if (!device || !select_device(device)) {
+        say(MB_ICONERROR, L"Could not import this cross save",
+            L"This cross save is for an unsupported device.");
+        return 0;
+    }
+    if (!crosssave_resolve_destination(source, &incoming, dest,
+                                       sizeof dest / sizeof dest[0], &route,
+                                       why, sizeof why)) {
+        say(MB_ICONERROR, L"Could not import this cross save", L"%s", why);
+        return 0;
+    }
+    if (choose_destination && !pick_save_destination(dest,
+                                                      sizeof dest / sizeof dest[0]))
+        return 0;
+    if (!choose_destination && route == CROSSSAVE_CONFIRM_STALE) {
+        if (!confirm_stale_crosssave(dest)) return 0;
+        force = 1;
+    }
+    if (choose_destination) {
+        wchar_t existing[MAX_PATH * 4];
+        CrossSaveIdentity current;
+        _snwprintf(existing, sizeof existing / sizeof existing[0], L"%s.tamasave", dest);
+        existing[sizeof existing / sizeof existing[0] - 1] = L'\0';
+        if (crosssave_read_identity(existing, &current, why, sizeof why) &&
+            !memcmp(current.lineage, incoming.lineage, sizeof current.lineage) &&
+            incoming.revision <= current.revision) {
+            if (!confirm_stale_crosssave(dest)) return 0;
+            force = 1;
+        }
+    }
+    if (!make_save_parent(dest)) {
+        say(MB_ICONERROR, L"Could not import this cross save",
+            L"Could not create the save folder for:\n%s", dest);
+        return 0;
+    }
+    if (!import_tamasave(source, dest, force)) return 0;
+    set_text(IDC_SAV, dest);
+    g_save_follows_rom = 0;
+    refresh_status();
+    refresh_devnote();
+    show_crosssave_status(dest);
     return 1;
 }
 
@@ -2359,7 +2490,6 @@ static void do_play(void)
     int buttons = (IsDlgButtonChecked(g_main, IDC_BUTTONS) == BST_CHECKED);
     int ontop   = (IsDlgButtonChecked(g_main, IDC_ONTOP)   == BST_CHECKED);
     g_resume    = (IsDlgButtonChecked(g_main, IDC_RESUME)  == BST_CHECKED);
-    g_update_handoff = (IsDlgButtonChecked(g_main, IDC_UPDATE_HANDOFF) == BST_CHECKED);
 
     /* Use the save file the player picked. Otherwise, let the emulator make
      * the normal folder beside the ROM. */
@@ -2371,9 +2501,7 @@ static void do_play(void)
     wchar_t wname[32];
     a2w(g_dev->name, wname, 32);
     at = wappend(cmd, CMDCAP, at, L" --device %s", wname);
-    at = wappend(cmd, CMDCAP, at, L" --persist-ram");
     at = append_resume_flag(cmd, CMDCAP, at, g_resume);
-    if (g_update_handoff) at = wappend(cmd, CMDCAP, at, L" --update-handoff-on-exit");
     /* No --rtc-mult: the game clock is changed in the emulator with +/-. */
     if (awake)     at = wappend(cmd, CMDCAP, at, L" --stay-awake");
     if (!buttons)  at = wappend(cmd, CMDCAP, at, L" --no-buttons");
@@ -2544,9 +2672,6 @@ static void build_ui(void)
        LBLX + 250, OPTY + 1, 110, 20, IDC_ONTOP);
     mk(L"BUTTON", L"Resume last session", WS_TABSTOP | BS_AUTOCHECKBOX,
        LBLX + 370, OPTY + 1, 150, 20, IDC_RESUME);
-    /* Only update the in-progress save on exit when the player has asked for it. */
-    mk(L"BUTTON", L"Update cross save on exit", WS_TABSTOP | BS_AUTOCHECKBOX,
-       LBLX + 530, OPTY + 1, 210, 20, IDC_UPDATE_HANDOFF);
     /* Stay awake defaults on so device sleep is not mistaken for a freeze. */
     CheckDlgButton(g_main, IDC_AWAKE, BST_CHECKED);
     /* Button visibility is a persistent preference. */
@@ -2559,10 +2684,6 @@ static void build_ui(void)
     g_resume = reg_get(REG_RESUME, 1) ? 1 : 0;
     CheckDlgButton(g_main, IDC_RESUME,
                    g_resume ? BST_CHECKED : BST_UNCHECKED);
-    /* In-progress saves are opt-in because they are copies, not live shared saves. */
-    g_update_handoff = reg_get(REG_UPDATE_HANDOFF, 0) ? 1 : 0;
-    CheckDlgButton(g_main, IDC_UPDATE_HANDOFF,
-                   g_update_handoff ? BST_CHECKED : BST_UNCHECKED);
 
     /* Load bindings at startup; Play reads them even if Help was never opened. */
     load_keys();
@@ -2680,6 +2801,21 @@ static void dump_layout(void)
 static LRESULT CALLBACK wndproc(HWND hw, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg) {
+    case WM_DROPFILES: {
+        HDROP drop = (HDROP)wp;
+        wchar_t path[MAX_PATH];
+        UINT count = DragQueryFileW(drop, 0xffffffff, NULL, 0);
+        if (count == 1 && DragQueryFileW(drop, 0, path, MAX_PATH)) {
+            if (is_tamasave_path(path)) open_crosssave(path, 0);
+            else {
+                set_text(IDC_SAV, path);
+                g_save_follows_rom = 0;
+                on_save_edited();
+            }
+        }
+        DragFinish(drop);
+        return 0;
+    }
     case WM_COMMAND: {
         int id   = LOWORD(wp);
         int code = HIWORD(wp);
@@ -2731,18 +2867,7 @@ static LRESULT CALLBACK wndproc(HWND hw, UINT msg, WPARAM wp, LPARAM lp)
                           L"All files\0*.*\0",
                           sav, MAX_PATH)) {
                 if (is_tamasave_path(sav)) {
-                    wchar_t dest[MAX_PATH];
-                    /* DLC works with raw saves, so leave the Save box on the
-                     * imported .sav instead of the in-progress save file. */
-                    default_savepath(dest, MAX_PATH);
-                    if (!pick_save_destination(dest, MAX_PATH)) return 0;
-                    if (!import_tamasave(sav, dest)) return 0;
-                    set_text(IDC_SAV, dest);
-                    g_save_follows_rom = 0;
-                    refresh_status();
-                    refresh_devnote();
-                    say(MB_ICONINFORMATION, L"Cross save imported",
-                        L"Imported the cross save into:\n%s", dest);
+                    open_crosssave(sav, 0);
                     return 0;
                 }
                 set_text(IDC_SAV, sav);
@@ -2750,6 +2875,14 @@ static LRESULT CALLBACK wndproc(HWND hw, UINT msg, WPARAM wp, LPARAM lp)
                 refresh_status();
                 refresh_devnote();
             }
+            return 0;
+        }
+        case IDM_IMPORT_CROSS_SAVE: {
+            wchar_t source[MAX_PATH] = L"";
+            if (pick_file(L"Import cross save (.tamasave)",
+                          L"Cross saves (*.tamasave)\0*.tamasave\0All files\0*.*\0",
+                          source, MAX_PATH))
+                open_crosssave(source, 1);
             return 0;
         }
         case IDC_SAV_MATCH:
@@ -2784,10 +2917,6 @@ static LRESULT CALLBACK wndproc(HWND hw, UINT msg, WPARAM wp, LPARAM lp)
             g_resume = IsDlgButtonChecked(g_main, IDC_RESUME) == BST_CHECKED;
             reg_set(REG_RESUME, g_resume);
             return 0;
-        case IDC_UPDATE_HANDOFF:
-            g_update_handoff = IsDlgButtonChecked(g_main, IDC_UPDATE_HANDOFF) == BST_CHECKED;
-            reg_set(REG_UPDATE_HANDOFF, g_update_handoff);
-            return 0;
         }
         return 0;
     }
@@ -2799,19 +2928,7 @@ static LRESULT CALLBACK wndproc(HWND hw, UINT msg, WPARAM wp, LPARAM lp)
         if (nh->idFrom == IDC_DEVICE && nh->code == TCN_SELCHANGE) {
             /* Re-selecting the same device preserves a hand-picked Save path. */
             const DlcDevice *d = dlc_device_at(TabCtrl_GetCurSel(g_devtabs));
-            if (d && d != g_dev) {
-                g_dev = d;
-                /* Set the device library before refresh_device_ui rescans it. */
-                wchar_t lib[MAX_PATH];
-                default_lib(g_dev, lib, MAX_PATH);
-                set_text(IDC_LIB, lib);
-                refresh_device_ui();      /* enables, tabs, and a rescan */
-                wchar_t rom[MAX_PATH];
-                default_rom(g_dev, rom, MAX_PATH);
-                set_text(IDC_ROM, rom);
-                g_save_follows_rom = 1;
-                on_rom_changed();
-            }
+            if (d && d != g_dev) select_device(d);
             return 0;
         }
 
@@ -2955,18 +3072,23 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE prev, LPSTR cmdline, int show)
     wc.lpszClassName = L"TamaLauncher";
     if (!RegisterClassExW(&wc)) return 1;
 
+    HMENU menu = CreateMenu();
+    HMENU file_menu = CreatePopupMenu();
+    AppendMenuW(file_menu, MF_STRING, IDM_IMPORT_CROSS_SAVE, L"Import cross save…");
+    AppendMenuW(menu, MF_POPUP, (UINT_PTR)file_menu, L"File");
     RECT rc = { 0, 0, S(CLIENTW), S(CLIENTH) };
     DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX
                 | WS_CLIPCHILDREN;
-    AdjustWindowRectEx(&rc, style, FALSE, WS_EX_CONTROLPARENT);
+    AdjustWindowRectEx(&rc, style, TRUE, WS_EX_CONTROLPARENT);
     int ww = rc.right - rc.left, wh = rc.bottom - rc.top;
     int wx = (GetSystemMetrics(SM_CXSCREEN) - ww) / 2;
     int wy = (GetSystemMetrics(SM_CYSCREEN) - wh) / 3;
 
     g_main = CreateWindowExW(WS_EX_CONTROLPARENT, wc.lpszClassName, APP_TITLE,
                              style, wx < 0 ? 0 : wx, wy < 0 ? 0 : wy, ww, wh,
-                             NULL, NULL, hi, NULL);
+                             NULL, menu, hi, NULL);
     if (!g_main) return 1;
+    DragAcceptFiles(g_main, TRUE);
 
     find_root();
     build_ui();
@@ -2985,6 +3107,22 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE prev, LPSTR cmdline, int show)
     refresh_status();
     /* Validate programmatic paths explicitly. */
     refresh_devnote();
+
+    /* Opening a .tamasave through Explorer follows the same silent route as
+     * the Save picker and a drag/drop. */
+    {
+        int argc = 0;
+        LPWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        if (argv && argc > 1 && file_exists(argv[1])) {
+            if (is_tamasave_path(argv[1])) open_crosssave(argv[1], 0);
+            else {
+                set_text(IDC_SAV, argv[1]);
+                g_save_follows_rom = 0;
+                on_save_edited();
+            }
+        }
+        if (argv) LocalFree(argv);
+    }
 
     ShowWindow(g_main, show);
     UpdateWindow(g_main);

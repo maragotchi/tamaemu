@@ -10,6 +10,10 @@
 #include <time.h>
 #ifdef _WIN32
 #include <windows.h>
+#include <bcrypt.h>
+#else
+#include <fcntl.h>
+#include <unistd.h>
 #endif
 
 static void desktop_why(char *why, size_t whysz, const char *fmt, ...)
@@ -82,6 +86,18 @@ static int write_atomic(const char *path, const uint8_t *data, size_t len,
     return 1;
 }
 
+static int verify_container_file(const char *path, char *why, size_t whysz)
+{
+    TamaSave verified = {0};
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    int ok = read_file(path, &wire, &wire_len, why, whysz) &&
+             tamasave_decode(wire, wire_len, &verified, why, whysz);
+    tamasave_free(&verified);
+    free(wire);
+    return ok;
+}
+
 enum { META_LENGTH = 44 };
 
 static int metadata_path(char *out, size_t outsz, const char *savpath,
@@ -90,20 +106,34 @@ static int metadata_path(char *out, size_t outsz, const char *savpath,
     return bundle_path(out, outsz, savpath, ".tamasave.meta", why, whysz);
 }
 
-static void new_lineage(uint8_t lineage[16])
+static int new_lineage(uint8_t lineage[16], char *why, size_t whysz)
 {
-    static uint64_t serial;
-    uint64_t a = (uint64_t)time(NULL) ^ (uintptr_t)lineage;
-    uint64_t b = ++serial ^ (a << 17) ^ (a >> 11);
-    for (int i = 0; i < 8; i++) {
-        lineage[i] = (uint8_t)(a >> (i * 8));
-        lineage[i + 8] = (uint8_t)(b >> (i * 8));
+#ifdef _WIN32
+    if (BCryptGenRandom(NULL, lineage, 16, BCRYPT_USE_SYSTEM_PREFERRED_RNG) == 0)
+        return 1;
+    desktop_why(why, whysz, "cannot obtain random cross save lineage");
+    return 0;
+#else
+    int fd = open("/dev/urandom", O_RDONLY);
+    size_t got = 0;
+    if (fd < 0) {
+        desktop_why(why, whysz, "cannot obtain random cross save lineage");
+        return 0;
     }
+    while (got < 16) {
+        ssize_t n = read(fd, lineage + got, 16 - got);
+        if (n <= 0) break;
+        got += (size_t)n;
+    }
+    close(fd);
+    if (got == 16) return 1;
+    desktop_why(why, whysz, "cannot obtain random cross save lineage");
+    return 0;
+#endif
 }
 
-/* Desktop has no slot database, so this sidecar remembers the lineage and
- * revision beside the raw save. That lets stale checks follow the same pet
- * after desktop play without putting desktop-only details in .tamasave. */
+/* This is the transition-only metadata reader. A container is authoritative
+ * when present; the retired sidecar is considered only while it is absent. */
 static int read_metadata(const char *savpath, TamaSave *meta,
                          char *why, size_t whysz)
 {
@@ -112,6 +142,26 @@ static int read_metadata(const char *savpath, TamaSave *meta,
     FILE *f;
     int valid;
 
+    {
+        TamaSave embedded = {0};
+        uint8_t *container = NULL;
+        size_t container_len = 0;
+        if (!bundle_path(path, sizeof path, savpath, ".tamasave", why, whysz)) return -1;
+        if (read_file(path, &container, &container_len, why, whysz)) {
+            if (!tamasave_decode(container, container_len, &embedded, why, whysz)) {
+                /* An unreadable container has no usable lineage. It stays on disk
+                 * until a later verified session write replaces it. */
+                free(container);
+                return 0;
+            }
+            memcpy(meta->lineage, embedded.lineage, sizeof meta->lineage);
+            meta->revision = embedded.revision;
+            meta->saved_utc_ms = embedded.saved_utc_ms;
+            tamasave_free(&embedded); free(container);
+            return 1;
+        }
+        if (errno != ENOENT) return -1;
+    }
     if (!metadata_path(path, sizeof path, savpath, why, whysz)) return -1;
     f = fopen(path, "rb");
     if (!f) {
@@ -135,74 +185,98 @@ static int read_metadata(const char *savpath, TamaSave *meta,
     return 1;
 }
 
-static int write_metadata(const char *savpath, const TamaSave *meta,
-                          char *why, size_t whysz)
+/* Migration is deliberately delete-after-verified-write: an interrupted export must
+ * leave every recoverable legacy sidecar in place. */
+static void remove_legacy_sidecars(const char *savpath)
 {
     char path[1200];
-    uint8_t wire[META_LENGTH] = { 0 };
+    const char *suffixes[] = { ".ram", ".state", ".tamasave.meta" };
+    for (size_t i = 0; i < sizeof suffixes / sizeof suffixes[0]; i++)
+        if (bundle_path(path, sizeof path, savpath, suffixes[i], NULL, 0)) remove(path);
+}
 
-    if (!metadata_path(path, sizeof path, savpath, why, whysz)) return 0;
-    memcpy(wire, "TAMAMETA", 8);
-    wire[8] = 1;
-    memcpy(wire + 12, meta->lineage, sizeof meta->lineage);
-    for (int i = 0; i < 8; i++) {
-        wire[28 + i] = (uint8_t)(meta->revision >> (i * 8));
-        wire[36 + i] = (uint8_t)(meta->saved_utc_ms >> (i * 8));
+int desktop_write_tamasave(const char *savpath, const char *out,
+                           const char *device,
+                           const uint8_t *sav, size_t sav_len,
+                           const uint8_t *ram, size_t ram_len,
+                           const uint8_t *state, size_t state_len,
+                           const char *state_build,
+                           char *why, size_t whysz)
+{
+    TamaSave save = {0}, previous = {0};
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    int had_metadata;
+    int ok = 0;
+
+    if (!savpath || !out || !device || !*device || !sav || !sav_len || !ram || !ram_len ||
+        (state_len && (!state || !state_build || !*state_build))) {
+        desktop_why(why, whysz, "invalid cross save write arguments"); return 0;
     }
-    return write_atomic(path, wire, sizeof wire, why, whysz);
+    had_metadata = read_metadata(savpath, &previous, why, whysz);
+    if (had_metadata < 0) goto done;
+    if (had_metadata) {
+        memcpy(save.lineage, previous.lineage, sizeof save.lineage);
+        save.revision = previous.revision;
+    } else if (!new_lineage(save.lineage, why, whysz)) goto done;
+    if (save.revision == UINT64_MAX) {
+        desktop_why(why, whysz, "cross save revision is exhausted"); goto done;
+    }
+    save.revision++;
+    save.saved_utc_ms = (uint64_t)time(NULL) * 1000;
+    save.sav = (uint8_t *)sav; save.sav_len = sav_len;
+    save.ram = (uint8_t *)ram; save.ram_len = ram_len;
+    strncpy(save.device, device, sizeof save.device - 1);
+    if (state_len) {
+        save.state = (uint8_t *)state; save.state_len = state_len;
+        strcpy(save.state_runtime, "tamaemu");
+        strncpy(save.state_build, state_build, sizeof save.state_build - 1);
+        save.state_version = 1;
+    }
+    /* Container code verifies record framing/CRC/tags; state.c alone validates
+     * the native payload's build, sizes, and flash checksum. */
+    if (!tamasave_encode(&save, &wire, &wire_len, why, whysz) ||
+        !write_atomic(out, wire, wire_len, why, whysz) ||
+        !verify_container_file(out, why, whysz))
+        goto done;
+    /* Migration is deliberately delete-after-verified-write: an interrupted
+     * container write must leave every recoverable sidecar in place. */
+    if (strlen(out) == strlen(savpath) + 9 && !strcmp(out + strlen(savpath), ".tamasave"))
+        remove_legacy_sidecars(savpath);
+    desktop_why(why, whysz, "saved");
+    ok = 1;
+done:
+    free(wire);
+    tamasave_free(&previous);
+    return ok;
 }
 
 int desktop_export_tamasave(const char *savpath, const char *out,
                             const char *device, char *why, size_t whysz)
 {
-    TamaSave save = {0}, previous = {0};
-    uint8_t *wire = NULL;
-    size_t wire_len = 0;
-    char ram_path[1024], state_path[1024];
-    int ok = 0;
-
     if (!savpath || !out || !device || !*device) {
         desktop_why(why, whysz, "invalid export arguments"); return 0;
     }
     {
-        int had_metadata = read_metadata(savpath, &previous, why, whysz);
-        if (had_metadata < 0) goto done;
-        if (had_metadata) {
-            memcpy(save.lineage, previous.lineage, sizeof save.lineage);
-            save.revision = previous.revision;
-        } else new_lineage(save.lineage);
-        if (save.revision == UINT64_MAX) {
-            desktop_why(why, whysz, "cross save revision is exhausted"); goto done;
+        char current[1024];
+        uint8_t *current_wire = NULL;
+        size_t current_len = 0;
+        TamaSave verified = {0};
+        /* Export is a copy, not a new save point: keep META revision intact. */
+        if (bundle_path(current, sizeof current, savpath, ".tamasave", why, whysz) &&
+            strcmp(current, out) && read_file(current, &current_wire, &current_len, why, whysz)) {
+            int copied = tamasave_decode(current_wire, current_len, &verified, why, whysz) &&
+                         write_atomic(out, current_wire, current_len, why, whysz) &&
+                         verify_container_file(out, why, whysz);
+            tamasave_free(&verified); free(current_wire);
+            if (copied) { desktop_why(why, whysz, "exported"); return 1; }
+            return 0;
         }
-        save.revision++;
-        save.saved_utc_ms = (uint64_t)time(NULL) * 1000;
+        free(current_wire);
+        if (!strcmp(current, out)) { desktop_why(why, whysz, "export target is already current cross save"); return 0; }
+        if (errno == ENOENT) { desktop_why(why, whysz, "no current cross save to export"); return 0; }
+        return 0;
     }
-    if (!bundle_path(ram_path, sizeof ram_path, savpath, ".ram", why, whysz) ||
-        !bundle_path(state_path, sizeof state_path, savpath, ".state", why, whysz) ||
-        !read_file(savpath, &save.sav, &save.sav_len, why, whysz) ||
-        !read_file(ram_path, &save.ram, &save.ram_len, why, whysz))
-        goto done;
-    if (!read_file(state_path, &save.state, &save.state_len, why, whysz)) {
-        /* A session snapshot is optional; other state-file failures are not. */
-        if (errno != ENOENT) goto done;
-        save.state = NULL; save.state_len = 0;
-    }
-    strncpy(save.device, device, sizeof save.device - 1);
-    if (save.state) {
-        strcpy(save.state_runtime, "tamaemu");
-        strcpy(save.state_build, "native");
-        save.state_version = 1;
-    }
-    if (!tamasave_encode(&save, &wire, &wire_len, why, whysz) ||
-        !write_atomic(out, wire, wire_len, why, whysz) ||
-        !write_metadata(savpath, &save, why, whysz))
-        goto done;
-    desktop_why(why, whysz, "exported");
-    ok = 1;
-done:
-    free(wire);
-    tamasave_free(&save);
-    return ok;
 }
 
 int desktop_import_tamasave(const char *in, const char *savpath,
@@ -213,7 +287,7 @@ int desktop_import_tamasave(const char *in, const char *savpath,
     uint8_t *wire = NULL;
     size_t wire_len = 0;
     uintptr_t lock = 0;
-    char ram_path[1024], state_path[1024];
+    char container_path[1024];
     int ok = 0;
 
     if (!in || !savpath || !device || !*device || !flash_len) {
@@ -240,16 +314,9 @@ int desktop_import_tamasave(const char *in, const char *savpath,
             goto done;
         }
     }
-    if (!bundle_path(ram_path, sizeof ram_path, savpath, ".ram", why, whysz) ||
-        !bundle_path(state_path, sizeof state_path, savpath, ".state", why, whysz) ||
+    if (!bundle_path(container_path, sizeof container_path, savpath, ".tamasave", why, whysz) ||
         !write_atomic(savpath, save.sav, save.sav_len, why, whysz) ||
-        !write_atomic(ram_path, save.ram, save.ram_len, why, whysz) ||
-        !write_metadata(savpath, &save, why, whysz))
-        goto done;
-    /* A browser snapshot is not a native state file. Keep only the snapshot
-     * this runtime owns; state_load performs the remaining build validation. */
-    if (save.state && !strcmp(save.state_runtime, "tamaemu") &&
-        !write_atomic(state_path, save.state, save.state_len, why, whysz))
+        !write_atomic(container_path, wire, wire_len, why, whysz))
         goto done;
     desktop_why(why, whysz, "imported");
     ok = 1;
@@ -258,4 +325,24 @@ done:
     free(wire);
     tamasave_free(&save);
     return ok;
+}
+
+int desktop_restore_tamasave(const char *savpath, Emu *e, const char *build_id,
+                             int restore_state, StateResult *state_result,
+                             char *why, size_t whysz)
+{
+    char path[1200]; uint8_t *wire = NULL; size_t wire_len = 0; TamaSave save = {0};
+    if (state_result) *state_result = STATE_NONE;
+    if (!bundle_path(path, sizeof path, savpath, ".tamasave", why, whysz)) return -1;
+    if (!read_file(path, &wire, &wire_len, why, whysz)) return errno == ENOENT ? 0 : -1;
+    if (!tamasave_decode(wire, wire_len, &save, why, whysz)) { free(wire); return -1; }
+    if (save.ram_len != e->dev.a0ram_size) {
+        desktop_why(why, whysz, "container RAM size does not match device"); tamasave_free(&save); free(wire); return -1;
+    }
+    memcpy(e->a0ram, save.ram, save.ram_len);
+    if (restore_state && save.state && !strcmp(save.state_runtime, "tamaemu")) {
+        StateResult result = state_decode(e, save.state, save.state_len, build_id, why, whysz);
+        if (state_result) *state_result = result;
+    }
+    tamasave_free(&save); free(wire); return 1;
 }

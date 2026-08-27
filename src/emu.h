@@ -474,6 +474,10 @@ StateResult state_load(Emu *e, const char *savpath, const char *build_id,
                        char *why, size_t whysz);
 int state_save(const Emu *e, const char *savpath, const char *build_id,
                char *why, size_t whysz);
+int state_encode(const Emu *e, const char *build_id, uint8_t **blob, size_t *blob_len,
+                 char *why, size_t whysz);
+StateResult state_decode(Emu *e, const uint8_t *blob, size_t blob_len,
+                         const char *build_id, char *why, size_t whysz);
 int state_sav_lock_acquire(const char *savpath, uintptr_t *token,
                            char *why, size_t whysz);
 void state_sav_lock_release(uintptr_t *token);

@@ -195,7 +195,9 @@ int tamasave_decode(const uint8_t *wire, size_t wire_length, TamaSave *save,
         if (length > wire_length - offset - RECORD_HEADER_SIZE) {
             tamasave_why(why, whysz, "bad record"); goto bad;
         }
-
+        /* A STAT snapshot is optional. Its framing tags identify it across runtimes;
+         * desktop payload compatibility is owned solely by TAMASTAT in state.c.
+         * A malformed or stale STAT must never keep SAV and RAM from opening. */
         if (read_u32(wire + offset + 8) !=
             crc32(wire + offset + RECORD_HEADER_SIZE, length)) {
             if (!memcmp(wire + offset, "STAT", 4)) {

@@ -46,14 +46,26 @@ Run two instances with DIFFERENT saves. They find each other automatically. Conn
 
 ## Saves
 
-Saves are stored in a folder where the .bin was selected. They're titled after the device you're currently playing. If the folder doesn't exist yet, the emulator will create one on your behalf. 
+Saves are stored in a folder where the .bin was selected. They're titled after the device you're currently playing. If the folder doesn't exist yet, the emulator will create one on your behalf. Each device gets its own dedicated folder, and each save gets its own folder as well.
 
-The  `.sav` file is the device's raw game-flash save. Sessions also write a `.sav.state` snapshots, which resumes the emulator session from when it was last closed.
-If this behavior is not wanted (ie, you want to restart instead) you can uncheck **Resume last session** to start from the OG save.
+The save layout is as follows:
+
+- `.bin` is your orginal firmware. This doesn't get overwritten or any updates. This doesn't get moved out of where it's originally placed.
+- `.sav` is the working memory and where any DLC gets placed. Created on your behalf.
+- `.tamasave` is a cross-save. It keeps RAM in sync and enables the exact-frame saves. Created on your behalf.
+- `.lock` is a temporary file that's only visible when the emulator is running.
+
+If you ever want to start from the last device save (to reset your save) uncheck **resume last session**
+
+Don't play two of the same saves at once. Goofy things happen.
 
 ## Licence
 
-GPL-3.0 — see `LICENSE`.
+This project is licensed under GNU GPL-3.0 — see `LICENSE` for the full terms.
 
-Tamagotchi firmware is not covered by this licence and is not included; it is
-Bandai's, and you supply your own dump! 
+In short: you are free to use, fork, modify and share this software, including for your own projects. Anything created and distributed with this software must be shipped with its source code. There is no warrany and it is provided as is.
+
+Per the license: do not create closed-source projects with this software and do not charge others for this software.
+
+The Tamagotchi firmware is not part of this project. It is not covered by the license. You must supply your own dump from hardware you legally own.
+

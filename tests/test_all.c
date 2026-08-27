@@ -1,4 +1,6 @@
 #include "../src/emu.h"
+#include "../src/desktop_tamasave.h"
+#include "../src/tamasave.h"
 #include "../tools/dlc.h"
 #include "../tools/swapreq.h"
 #include <stdlib.h>
@@ -151,6 +153,40 @@ static void test_state_snapshot(void)
     saved.auto_link = true;
     CHECK(state_save(&saved, path, build, why, sizeof why) == 1,
           "state snapshot written: %s", why);
+    {
+        uint8_t *encoded = NULL, *from_file = NULL;
+        size_t encoded_len = 0;
+        long file_len = -1;
+        FILE *state_file = fopen(statepath, "rb");
+        CHECK(state_encode(&saved, build, &encoded, &encoded_len, why, sizeof why) == 1,
+              "state snapshot encodes in memory: %s", why);
+        CHECK(state_file != NULL && fseek(state_file, 0, SEEK_END) == 0 &&
+              (file_len = ftell(state_file)) >= 0 && fseek(state_file, 0, SEEK_SET) == 0,
+              "legacy state file is readable for encoder equivalence");
+        if (state_file && file_len >= 0) {
+            from_file = malloc((size_t)file_len);
+            CHECK(from_file != NULL && fread(from_file, 1, (size_t)file_len, state_file) == (size_t)file_len,
+                  "legacy state file bytes read for encoder equivalence");
+            CHECK(encoded_len == (size_t)file_len && !memcmp(encoded, from_file, encoded_len),
+                  "in-memory state encoding is byte-identical to legacy state file");
+            if (encoded) {
+                Emu decoded;
+                memset(&decoded, 0, sizeof decoded);
+                decoded.dev = *dev;
+                decoded.rom = malloc(dev->rom_size);
+                if (decoded.rom) {
+                    memset(decoded.rom, 0xFF, dev->rom_size);
+                    CHECK(state_decode(&decoded, encoded, encoded_len, build, why, sizeof why) == STATE_LOADED &&
+                          decoded.pc == saved.pc && decoded.cycles == saved.cycles,
+                          "in-memory state decoder uses the snapshot validation and restore path: %s", why);
+                    free(decoded.rom);
+                }
+            }
+        }
+        if (state_file) fclose(state_file);
+        free(from_file);
+        free(encoded);
+    }
 
     memset(&restored, 0, sizeof restored);
     restored.dev = *dev;
@@ -269,6 +305,153 @@ static void test_state_snapshot(void)
     free(saved.rom);
     remove(path);
     remove(statepath);
+}
+
+/* The launch path must treat the raw .sav as flash authority: a rejected STAT
+ * still restores the container's RAM, while corrupt/absent containers do not. */
+static void test_container_restore(void)
+{
+    const DeviceProfile *dev = device_default();
+    const char *savpath = "container_restore_test.tmp";
+    const char *build = "test-build";
+    Emu saved, restored;
+    uint8_t *stat = NULL;
+    size_t stat_len = 0;
+    StateResult result;
+    char why[128];
+    FILE *f;
+
+    memset(&restored, 0, sizeof restored);
+    restored.dev = *dev;
+    restored.rom = malloc(dev->rom_size);
+    CHECK(restored.rom != NULL, "container-restore absent fixture ROM allocated");
+    if (!restored.rom) return;
+    memset(restored.rom, 0xFF, dev->rom_size);
+    restored.a0ram[0x17] = 0x11;
+    result = STATE_LOADED;
+    CHECK(desktop_restore_tamasave(savpath, &restored, build, 1, &result, why, sizeof why) == 0 &&
+          result == STATE_NONE && restored.a0ram[0x17] == 0x11,
+          "absent cross save leaves a normal flash boot untouched: %s", why);
+    free(restored.rom);
+
+    memset(&saved, 0, sizeof saved);
+    saved.dev = *dev;
+    saved.rom = malloc(dev->rom_size);
+    CHECK(saved.rom != NULL, "container-restore saved fixture ROM allocated");
+    if (!saved.rom) return;
+    memset(saved.rom, 0xFF, dev->rom_size);
+    saved.pc = 0x02401234u;
+    saved.a0ram[0x17] = 0xA7;
+    CHECK(state_encode(&saved, build, &stat, &stat_len, why, sizeof why),
+          "native STAT encodes for container restore: %s", why);
+    CHECK(desktop_write_tamasave(savpath, "container_restore_test.tmp.tamasave",
+                                 dev->name, saved.rom, dev->rom_size,
+                                 saved.a0ram, dev->a0ram_size, stat, stat_len,
+                                 build, why, sizeof why),
+          "container restore fixture writes: %s", why);
+
+    memset(&restored, 0, sizeof restored);
+    restored.dev = *dev;
+    restored.rom = malloc(dev->rom_size);
+    CHECK(restored.rom != NULL, "container-restore destination ROM allocated");
+    if (restored.rom) {
+        memset(restored.rom, 0xFF, dev->rom_size);
+        result = STATE_NONE;
+        CHECK(desktop_restore_tamasave(savpath, &restored, build, 1, &result, why, sizeof why) == 1 &&
+              result == STATE_LOADED && restored.a0ram[0x17] == 0xA7 && restored.pc == saved.pc,
+              "container restores RAM and compatible native STAT: %s", why);
+
+        /* Re-encode a valid container with a previous-build STAT.  Only the
+         * native snapshot is incompatible; portable RAM must still load. */
+        {
+            TamaSave changed = {0};
+            uint8_t *wire = NULL, *rewritten = NULL, *prior_stat = NULL;
+            size_t rewritten_len = 0, prior_stat_len = 0;
+            long file_len = -1;
+            FILE *container = fopen("container_restore_test.tmp.tamasave", "rb");
+            CHECK(container != NULL && fseek(container, 0, SEEK_END) == 0 &&
+                  (file_len = ftell(container)) >= 0 && fseek(container, 0, SEEK_SET) == 0,
+                  "prior-build container fixture is readable");
+            if (container && file_len >= 0) {
+                wire = malloc((size_t)file_len);
+                CHECK(wire != NULL && fread(wire, 1, (size_t)file_len, container) == (size_t)file_len &&
+                      fclose(container) == 0, "prior-build container fixture read");
+                container = NULL;
+            }
+            if (container) fclose(container);
+            if (wire && state_encode(&saved, "prior-build", &prior_stat, &prior_stat_len, why, sizeof why) &&
+                tamasave_decode(wire, (size_t)file_len, &changed, why, sizeof why)) {
+                free(changed.state);
+                changed.state = prior_stat; changed.state_len = prior_stat_len; prior_stat = NULL;
+                memset(changed.state_build, 0, sizeof changed.state_build);
+                strcpy(changed.state_build, "prior-build");
+                CHECK(tamasave_encode(&changed, &rewritten, &rewritten_len, why, sizeof why),
+                      "previous-build STAT container re-encodes: %s", why);
+                container = fopen("container_restore_test.tmp.tamasave", "wb");
+                CHECK(container != NULL && fwrite(rewritten, 1, rewritten_len, container) == rewritten_len &&
+                      fclose(container) == 0, "previous-build STAT container written");
+                container = NULL;
+                memset(&restored, 0, sizeof restored);
+                restored.dev = *dev; restored.rom = malloc(dev->rom_size);
+                if (restored.rom) {
+                    memset(restored.rom, 0xFF, dev->rom_size); restored.pc = 0x11111111u;
+                    result = STATE_NONE;
+                    CHECK(desktop_restore_tamasave(savpath, &restored, build, 1, &result, why, sizeof why) == 1 &&
+                          result == STATE_REJECTED && restored.a0ram[0x17] == 0xA7 &&
+                          restored.pc == 0x11111111u && strstr(why, "build identifier") != NULL,
+                          "previous-build STAT cold-boots with restored RAM: %s", why);
+                    free(restored.rom);
+                }
+            }
+            free(prior_stat); free(wire); free(rewritten); tamasave_free(&changed);
+            CHECK(desktop_write_tamasave(savpath, "container_restore_test.tmp.tamasave",
+                                         dev->name, saved.rom, dev->rom_size,
+                                         saved.a0ram, dev->a0ram_size, stat, stat_len,
+                                         build, why, sizeof why),
+                  "compatible container restored after prior-build test: %s", why);
+        }
+
+        /* An externally patched .sav rejects only STAT; RAM remains portable. */
+        memset(&restored, 0, sizeof restored);
+        restored.dev = *dev;
+        restored.rom = malloc(dev->rom_size);
+        if (restored.rom) {
+            memset(restored.rom, 0xFF, dev->rom_size);
+            restored.rom[0] ^= 1;
+            restored.pc = 0x11111111u;
+            result = STATE_NONE;
+            CHECK(desktop_restore_tamasave(savpath, &restored, build, 1, &result, why, sizeof why) == 1 &&
+                  result == STATE_REJECTED && restored.a0ram[0x17] == 0xA7 &&
+                  restored.pc == 0x11111111u && strstr(why, "flash checksum") != NULL,
+                  "stale STAT cold-boots with restored RAM after raw .sav changes: %s", why);
+            free(restored.rom);
+        }
+    }
+
+    free(stat);
+
+    f = fopen("container_restore_test.tmp.tamasave", "wb");
+    CHECK(f != NULL && fputs("bad", f) >= 0 && fclose(f) == 0,
+          "corrupt container fixture written");
+    memset(&restored, 0, sizeof restored);
+    restored.dev = *dev;
+    restored.rom = malloc(dev->rom_size);
+    if (restored.rom) {
+        memset(restored.rom, 0xFF, dev->rom_size);
+        restored.a0ram[0x17] = 0x22;
+        result = STATE_LOADED;
+        CHECK(desktop_restore_tamasave(savpath, &restored, build, 1, &result, why, sizeof why) == -1 &&
+              result == STATE_NONE && restored.a0ram[0x17] == 0x22 &&
+              why[0] != '\0',
+              "corrupt cross save is retained and restores nothing: %s", why);
+        free(restored.rom);
+    }
+    f = fopen("container_restore_test.tmp.tamasave", "rb");
+    CHECK(f != NULL, "corrupt cross save remains in place for a later successful exit write");
+    if (f) fclose(f);
+
+    free(saved.rom);
+    remove("container_restore_test.tmp.tamasave");
 }
 
 static void test_state_lifecycle(void)
@@ -2117,6 +2300,7 @@ int main(void)
     test_save_folder_migration();
     test_state_save_lock();
     test_state_snapshot();
+    test_container_restore();
     test_state_lifecycle();
     test_devices();
     test_dlc_device_rows();
