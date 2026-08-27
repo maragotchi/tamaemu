@@ -1,4 +1,5 @@
 #include "emu.h"
+#include "desktop_tamasave.h"
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -147,6 +148,11 @@ static void usage(void)
       "        [--stay-awake starts it on: screen never sleeps, tama keeps animating]\n"
       "        [--on-top  keep the window above other windows]\n"
       "        [--persist-ram  keep A0RAM in <sav>.ram so the tama survives a restart]\n"
+      "        [--import-tamasave file  replace this save from an in-progress save]\n"
+      "        [--import-only  import the in-progress save, then exit without starting the game]\n"
+      "        [--force-tamasave-import  allow an older/equal in-progress save to replace this save]\n"
+      "        [--export-tamasave file  write an in-progress save on exit]\n"
+      "        [--update-handoff-on-exit  update <sav>.tamasave on exit]\n"
       "        [--restart  cold boot, ignoring any saved machine snapshot]\n"
       "        [--no-state  do not load or write a machine snapshot]\n");
     exit(1);
@@ -387,7 +393,10 @@ int main(int argc, char **argv)
 {
     static Emu e;
     const char *rompath = NULL, *bmp = NULL, *savoverride = NULL, *nfc_inject = NULL;
+    const char *import_tamasave = NULL, *export_tamasave = NULL;
     bool persist_ram = false;
+    bool update_handoff_on_exit = false, import_only = false;
+    bool force_tamasave_import = false;
     const char *linkrom = NULL, *savb = NULL, *net_join = NULL, *devb_name = NULL;
     int net_host = 0, net_peer = 0, auto_port = 7878;
     bool no_auto_link = false, port_set = false;
@@ -433,6 +442,18 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--dump-bmp") && i + 1 < argc) bmp = argv[++i];
         else if (!strcmp(argv[i], "--sav") && i + 1 < argc) savoverride = argv[++i];
         else if (!strcmp(argv[i], "--persist-ram")) persist_ram = true;
+        else if (!strcmp(argv[i], "--import-tamasave") && i + 1 < argc) {
+            import_tamasave = argv[++i]; persist_ram = true;
+        }
+        /* The launcher uses this mode to import an in-progress save without opening a game window. */
+        else if (!strcmp(argv[i], "--import-only")) import_only = true;
+        else if (!strcmp(argv[i], "--force-tamasave-import")) force_tamasave_import = true;
+        else if (!strcmp(argv[i], "--export-tamasave") && i + 1 < argc) {
+            export_tamasave = argv[++i]; persist_ram = true;
+        }
+        else if (!strcmp(argv[i], "--update-handoff-on-exit")) {
+            update_handoff_on_exit = true; persist_ram = true;
+        }
         else if (!strcmp(argv[i], "--restart")) restart = true;
         else if (!strcmp(argv[i], "--no-state")) no_state = true;
         else if (!strcmp(argv[i], "--state-smoke")) state_smoke = true;
@@ -542,6 +563,10 @@ int main(int argc, char **argv)
         else usage();
     }
     if (!rompath) usage();
+    if (import_only && !import_tamasave) {
+        fprintf(stderr, "[tamasave] --import-only requires --import-tamasave\n");
+        return 1;
+    }
     if (state_smoke && (linkrom || net_host || net_join || net_peer)) {
         fprintf(stderr, "[state] --state-smoke only supports standalone sessions\n");
         return 1;
@@ -599,6 +624,17 @@ int main(int argc, char **argv)
             }
         }
     }
+    if (import_tamasave) {
+        char import_why[256];
+        if (!desktop_import_tamasave(import_tamasave, savpath, e.dev.name,
+                                     e.dev.rom_size, force_tamasave_import,
+                                     import_why, sizeof import_why)) {
+            fprintf(stderr, "[tamasave] cannot import %s: %s\n", import_tamasave, import_why);
+            return 1;
+        }
+        fprintf(stderr, "[tamasave] imported %s -> %s\n", import_tamasave, savpath);
+    }
+    if (import_only) return 0;
     {
         uintptr_t sav_lock = 0;
         char lock_why[1200];
@@ -1443,23 +1479,45 @@ int main(int argc, char **argv)
     }
 
     /* State follows the raw flash save. */
+    bool state_ready = true;
     if (state_eligible && !e.stopped && flash_ready) {
         if (state_save_on_exit(&e, savpath, snapshot_build_id, true,
                                state_why, sizeof state_why))
             fprintf(stderr, "[state] machine snapshot -> %s.state\n", savpath);
-        else
+        else {
+            state_ready = false;
             fprintf(stderr, "[state] cannot save machine snapshot: %s\n", state_why);
+        }
     }
 
     /* A0RAM changes every frame, so persistent RAM is always written. */
+    bool ram_ready = !persist_ram;
     if (persist_ram) {
         FILE *rf = fopen(rampath, "wb");
         if (rf) {
-            fwrite(e.a0ram, 1, e.dev.a0ram_size, rf);
-            fclose(rf);
-            fprintf(stderr, "[ram] saved %u bytes -> %s\n",
-                    (unsigned)e.dev.a0ram_size, rampath);
+            size_t nw = fwrite(e.a0ram, 1, e.dev.a0ram_size, rf);
+            int close_ok = fclose(rf) == 0;
+            if (nw == e.dev.a0ram_size && close_ok) {
+                ram_ready = true;
+                fprintf(stderr, "[ram] saved %u bytes -> %s\n",
+                        (unsigned)e.dev.a0ram_size, rampath);
+            } else {
+                fprintf(stderr, "[ram] cannot write %s\n", rampath);
+            }
         } else fprintf(stderr, "[ram] cannot write %s\n", rampath);
+    }
+    if (ram_ready && (export_tamasave || (update_handoff_on_exit && flash_ready && state_ready))) {
+        char auto_handoff[1200], handoff_why[256];
+        const char *handoff = export_tamasave;
+        if (!handoff) {
+            snprintf(auto_handoff, sizeof auto_handoff, "%s.tamasave", savpath);
+            handoff = auto_handoff;
+        }
+        if (desktop_export_tamasave(savpath, handoff, e.dev.name,
+                                    handoff_why, sizeof handoff_why))
+            fprintf(stderr, "[tamasave] in-progress save -> %s\n", handoff);
+        else
+            fprintf(stderr, "[tamasave] cannot write in-progress save: %s\n", handoff_why);
     }
     fprintf(stderr, "[end] piezo tone events (T0): %u\n", e.tone_ev_w);
     fprintf(stderr, "[end] cycles=%llu pc=%08x stopped=%d halted=%d wall=%.1fs\n",
