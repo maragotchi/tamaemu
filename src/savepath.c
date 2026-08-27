@@ -84,7 +84,7 @@ static int move_file(const char *from, const char *to)
  * folder layout. Prevents overwrites for older saves. */
 int savepath_migrate_legacy(const char *legacy_sav, const char *savpath)
 {
-    static const char *suffixes[] = { "", ".ram", ".state", ".bak" };
+    static const char *suffixes[] = { "", ".tamasave", ".tamasave.meta", ".ram", ".state", ".bak" };
     char oldpath[1100], newpath[1100];
     if (!legacy_sav || !savpath || file_exists(savpath) || !file_exists(legacy_sav))
         return 1;

@@ -103,63 +103,49 @@ void state_sav_lock_release(uintptr_t *token)
     *token = 0;
 }
 
-StateResult state_load(Emu *e, const char *savpath, const char *build_id,
-                       char *why, size_t whysz)
+/* The container validates its STAT record framing, CRC and tags. This shared
+ * state.c path alone validates the native payload's build, sizes and flash CRC. */
+StateResult state_decode(Emu *e, const uint8_t *blob, size_t blob_len,
+                         const char *build_id, char *why, size_t whysz)
 {
-    char path[1024], want_build[32], want_device[32];
+    char want_build[32], want_device[32];
     StateHeader h;
     Emu saved;
-    FILE *f;
-    int extra;
 
-    if (!e || !e->rom || !savpath || !build_id || !e->dev.name) {
-        state_why(why, whysz, "invalid state load arguments");
+    if (!e || !e->rom || !blob || !build_id || !e->dev.name) {
+        state_why(why, whysz, "invalid state decode arguments");
         return STATE_IO_ERROR;
     }
-    if (!state_path(path, sizeof path, savpath, ".state", why, whysz) ||
-        !state_name(want_build, build_id) || !state_name(want_device, e->dev.name)) {
+    if (!state_name(want_build, build_id) || !state_name(want_device, e->dev.name)) {
         state_why(why, whysz, "state build or device identifier too long");
         return STATE_IO_ERROR;
     }
-    f = fopen(path, "rb");
-    if (!f) {
-        if (errno == ENOENT) { state_why(why, whysz, "no state file"); return STATE_NONE; }
-        state_why(why, whysz, "cannot open state file: %s", strerror(errno));
-        return STATE_IO_ERROR;
-    }
-    if (fread(&h, 1, sizeof h, f) != sizeof h) {
-        fclose(f); state_why(why, whysz, "truncated state header"); return STATE_REJECTED;
-    }
+    if (blob_len < sizeof h) { state_why(why, whysz, "truncated state header"); return STATE_REJECTED; }
+    memcpy(&h, blob, sizeof h);
     if (memcmp(h.magic, STATE_MAGIC, 8)) {
-        fclose(f); state_why(why, whysz, "state magic does not match"); return STATE_REJECTED;
+        state_why(why, whysz, "state magic does not match"); return STATE_REJECTED;
     }
     if (h.version != STATE_VERSION) {
-        fclose(f); state_why(why, whysz, "state version does not match"); return STATE_REJECTED;
+        state_why(why, whysz, "state version does not match"); return STATE_REJECTED;
     }
     if (h.emu_size != sizeof(Emu)) {
-        fclose(f); state_why(why, whysz, "state Emu size does not match"); return STATE_REJECTED;
+        state_why(why, whysz, "state Emu size does not match"); return STATE_REJECTED;
     }
     if (h.rom_size != e->dev.rom_size) {
-        fclose(f); state_why(why, whysz, "state ROM size does not match"); return STATE_REJECTED;
+        state_why(why, whysz, "state ROM size does not match"); return STATE_REJECTED;
     }
     if (memcmp(h.build, want_build, sizeof h.build)) {
-        fclose(f); state_why(why, whysz, "state build identifier does not match"); return STATE_REJECTED;
+        state_why(why, whysz, "state build identifier does not match"); return STATE_REJECTED;
     }
     if (memcmp(h.device, want_device, sizeof h.device)) {
-        fclose(f); state_why(why, whysz, "state device name does not match"); return STATE_REJECTED;
+        state_why(why, whysz, "state device name does not match"); return STATE_REJECTED;
     }
     if (h.flash_crc != state_crc32(e->rom, e->dev.rom_size)) {
-        fclose(f); state_why(why, whysz, "state flash checksum does not match save"); return STATE_REJECTED;
+        state_why(why, whysz, "state flash checksum does not match save"); return STATE_REJECTED;
     }
-    if (fread(&saved, 1, sizeof saved, f) != sizeof saved) {
-        fclose(f); state_why(why, whysz, "truncated state payload"); return STATE_REJECTED;
-    }
-    extra = fgetc(f);
-    if (extra == EOF && ferror(f)) {
-        fclose(f); state_why(why, whysz, "state read failed"); return STATE_IO_ERROR;
-    }
-    if (fclose(f) != 0) { state_why(why, whysz, "state read failed"); return STATE_IO_ERROR; }
-    if (extra != EOF) { state_why(why, whysz, "state file has trailing data"); return STATE_REJECTED; }
+    if (blob_len < sizeof h + sizeof saved) { state_why(why, whysz, "truncated state payload"); return STATE_REJECTED; }
+    if (blob_len != sizeof h + sizeof saved) { state_why(why, whysz, "state file has trailing data"); return STATE_REJECTED; }
+    memcpy(&saved, blob + sizeof h, sizeof saved);
 
     {
         uint8_t *rom = e->rom;
@@ -210,27 +196,59 @@ StateResult state_load(Emu *e, const char *savpath, const char *build_id,
     return STATE_LOADED;
 }
 
+StateResult state_load(Emu *e, const char *savpath, const char *build_id,
+                       char *why, size_t whysz)
+{
+    char path[1024];
+    FILE *f;
+    long n;
+    uint8_t *blob;
+    StateResult result;
+
+    if (!e || !e->rom || !savpath || !build_id || !e->dev.name) {
+        state_why(why, whysz, "invalid state load arguments");
+        return STATE_IO_ERROR;
+    }
+    if (!state_path(path, sizeof path, savpath, ".state", why, whysz)) return STATE_IO_ERROR;
+    f = fopen(path, "rb");
+    if (!f) {
+        if (errno == ENOENT) { state_why(why, whysz, "no state file"); return STATE_NONE; }
+        state_why(why, whysz, "cannot open state file: %s", strerror(errno));
+        return STATE_IO_ERROR;
+    }
+    if (fseek(f, 0, SEEK_END) != 0 || (n = ftell(f)) < 0 || fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f); state_why(why, whysz, "state read failed"); return STATE_IO_ERROR;
+    }
+    blob = malloc(n ? (size_t)n : 1);
+    if (!blob) { fclose(f); state_why(why, whysz, "out of memory"); return STATE_IO_ERROR; }
+    if ((size_t)n && fread(blob, 1, (size_t)n, f) != (size_t)n) {
+        free(blob); fclose(f); state_why(why, whysz, "state read failed"); return STATE_IO_ERROR;
+    }
+    if (fclose(f) != 0) { free(blob); state_why(why, whysz, "state read failed"); return STATE_IO_ERROR; }
+    result = state_decode(e, blob, (size_t)n, build_id, why, whysz);
+    free(blob);
+    return result;
+}
+
 int state_save(const Emu *e, const char *savpath, const char *build_id,
                char *why, size_t whysz)
 {
     char path[1024], tmp[1024];
-    StateHeader h;
+    uint8_t *blob = NULL;
+    size_t blob_len = 0;
     FILE *f = NULL;
     int ok = 0;
     if (!e || !e->rom || !savpath || !build_id || !e->dev.name) {
         state_why(why, whysz, "invalid state save arguments"); return 0;
     }
     if (!state_path(path, sizeof path, savpath, ".state", why, whysz) ||
-        !state_path(tmp, sizeof tmp, savpath, ".state.tmp", why, whysz) ||
-        !state_name(h.build, build_id) || !state_name(h.device, e->dev.name)) {
+        !state_path(tmp, sizeof tmp, savpath, ".state.tmp", why, whysz)) {
         state_why(why, whysz, "state build or device identifier too long"); return 0;
     }
-    memcpy(h.magic, STATE_MAGIC, 8);
-    h.version = STATE_VERSION; h.emu_size = sizeof(Emu); h.rom_size = e->dev.rom_size;
-    h.flash_crc = state_crc32(e->rom, e->dev.rom_size);
+    if (!state_encode(e, build_id, &blob, &blob_len, why, whysz)) return 0;
     f = fopen(tmp, "wb");
-    if (!f) { state_why(why, whysz, "cannot create state temporary file: %s", strerror(errno)); return 0; }
-    if (fwrite(&h, 1, sizeof h, f) != sizeof h || fwrite(e, 1, sizeof *e, f) != sizeof *e) {
+    if (!f) { free(blob); state_why(why, whysz, "cannot create state temporary file: %s", strerror(errno)); return 0; }
+    if (fwrite(blob, 1, blob_len, f) != blob_len) {
         state_why(why, whysz, "cannot write state temporary file"); goto done;
     }
     if (fclose(f) != 0) { f = NULL; state_why(why, whysz, "cannot close state temporary file"); goto done; }
@@ -246,5 +264,25 @@ int state_save(const Emu *e, const char *savpath, const char *build_id,
 done:
     if (f) fclose(f);
     if (!ok) remove(tmp);
+    free(blob);
     return ok;
+}
+
+int state_encode(const Emu *e, const char *build_id, uint8_t **blob, size_t *blob_len,
+                 char *why, size_t whysz)
+{
+    StateHeader h;
+    uint8_t *out;
+    if (!e || !e->rom || !build_id || !blob || !blob_len || !e->dev.name ||
+        !state_name(h.build, build_id) || !state_name(h.device, e->dev.name)) {
+        state_why(why, whysz, "invalid state encode arguments"); return 0;
+    }
+    out = malloc(sizeof h + sizeof *e);
+    if (!out) { state_why(why, whysz, "out of memory"); return 0; }
+    memcpy(h.magic, STATE_MAGIC, 8); h.version = STATE_VERSION;
+    h.emu_size = sizeof(Emu); h.rom_size = e->dev.rom_size;
+    h.flash_crc = state_crc32(e->rom, e->dev.rom_size);
+    memcpy(out, &h, sizeof h); memcpy(out + sizeof h, e, sizeof *e);
+    *blob = out; *blob_len = sizeof h + sizeof *e; state_why(why, whysz, "encoded");
+    return 1;
 }
