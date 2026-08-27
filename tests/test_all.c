@@ -562,6 +562,15 @@ static void test_mem(void)
     CHECK(mem_read32(e, 0x80000) == 0xCAFEF00D, "ivram roundtrip");
 }
 
+static void test_mem_dstram_past_0x84800(void)
+{
+    Emu *e = fresh();
+    mem_write16(e, 0x84808, 0xFFF8);
+    mem_write8(e, 0x8480B, 0x0B);
+    CHECK(mem_read16(e, 0x84808) == 0xFFF8, "DSTRAM word past 0x84800 roundtrips");
+    CHECK(mem_read8(e, 0x8480B) == 0x0B, "DSTRAM byte past 0x84800 roundtrips");
+}
+
 static void test_cpu_alu(void)
 {
     Emu *e = fresh();
@@ -1286,6 +1295,22 @@ static void test_cpu_bad_pc_trap(void)
     e->pc = e->dev.ivram_base;
     cpu_step(e);
     CHECK(!e->stopped, "IVRAM execution not trapped: %s", e->stop_reason);
+}
+
+static void test_cpu_pc_masks_to_28_bits(void)
+{
+    Emu *e = fresh();
+    static const uint16_t jp_r0[] = { 0x0680 };      /* jp %r0 */
+    load_prog(e, 0x1000, jp_r0, 1);
+    mem_write16(e, 0x1200, 0x6C11);                  /* ld.w %r1,1 */
+    e->r[0] = 0x10000000u | 0x1200u;
+
+    cpu_step(e);
+    CHECK(e->pc == 0x10001200u, "jp preserves the encoded bus-overflow target: pc=%08x", e->pc);
+    cpu_step(e);
+    CHECK(!e->stopped, "masked target executes instead of trapping: %s", e->stop_reason);
+    CHECK(e->r[1] == 1 && e->pc == 0x1202, "pc masks to RAM target and executes: r1=%x pc=%08x",
+          e->r[1], e->pc);
 }
 
 /* Exercise ranged NOR-write logging and its line budget. */
@@ -2325,11 +2350,13 @@ int main(void)
     test_ir_rx_wire_time();
     test_rtc_buttons();
     test_mem();
+    test_mem_dstram_past_0x84800();
     test_cpu_alu();
     test_cpu_ext();
     test_cpu_xjp_patch_bytes();
     test_cpu_branch_call();
     test_cpu_bad_pc_trap();
+    test_cpu_pc_masks_to_28_bits();
     test_watch_flash();
     test_cmu();
     test_lockstep();
