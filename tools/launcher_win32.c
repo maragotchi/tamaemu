@@ -56,8 +56,9 @@ enum {
     IDC_STATUS, IDC_HINT, IDC_WELCOME, IDC_DEVICE,
     IDC_ONTOP,
     IDC_KEY_A, IDC_KEY_B, IDC_KEY_C, /* appended; consecutive - code does IDC_KEY_A + i */
-    IDC_HELP_AGAIN,                 
-    IDC_RESUME
+    IDC_HELP_AGAIN,
+    IDC_RESUME,
+    IDC_UPDATE_HANDOFF
 };
 
 /* Button glyphs use the system UI font. U+1F4C1 needs a UTF-16 surrogate pair. */
@@ -72,6 +73,7 @@ enum {
 #define REG_BUTTONS L"ShowButtons"
 #define REG_ONTOP   L"AlwaysOnTop"
 #define REG_RESUME  L"ResumeLastSession"
+#define REG_UPDATE_HANDOFF L"UpdateHandoffOnExit"
 #define REG_KEYS    L"Keys"
 
 /* Layout uses 96-DPI units and right-anchored rows; S() scales at startup. */
@@ -124,6 +126,7 @@ static unsigned char *g_checked;           /* parallel to g_items */
 static int       g_populating;             /* suppress LVN_ITEMCHANGED echo */
 static int       g_save_follows_rom = 1;
 static int       g_resume = 1;
+static int       g_update_handoff;
 static wchar_t   g_devnote[160];           /* "Save looks like ...", or "" */
 static int       g_tab_has_sets;           /* the visible tab shows a "[n]" tile */
 static HIMAGELIST g_imgs;                  /* the visible tab's thumbnails */
@@ -703,6 +706,35 @@ static int pick_file(const wchar_t *title, const wchar_t *filter,
     wcsncpy(path, buf, (size_t)pathsz - 1);
     path[pathsz - 1] = L'\0';
     return 1;
+}
+
+static int pick_save_destination(wchar_t *path, int pathsz)
+{
+    wchar_t buf[MAX_PATH];
+    wcsncpy(buf, path, MAX_PATH - 1);
+    buf[MAX_PATH - 1] = L'\0';
+
+    OPENFILENAMEW ofn;
+    memset(&ofn, 0, sizeof ofn);
+    ofn.lStructSize = sizeof ofn;
+    ofn.hwndOwner   = g_main;
+    ofn.lpstrFilter = L"Save files (*.sav)\0*.sav\0All files\0*.*\0";
+    ofn.lpstrFile   = buf;
+    ofn.nMaxFile    = MAX_PATH;
+    ofn.lpstrTitle  = L"Choose where to import this session";
+    ofn.lpstrDefExt = L"sav";
+    ofn.Flags       = OFN_PATHMUSTEXIST | OFN_EXPLORER | OFN_NOCHANGEDIR
+                    | OFN_OVERWRITEPROMPT;
+    if (!GetSaveFileNameW(&ofn)) return 0;
+    wcsncpy(path, buf, (size_t)pathsz - 1);
+    path[pathsz - 1] = L'\0';
+    return 1;
+}
+
+static int is_tamasave_path(const wchar_t *path)
+{
+    const wchar_t *dot = wcsrchr(path, L'.');
+    return dot && _wcsicmp(dot, L".tamasave") == 0;
 }
 
 static int pick_folder(const wchar_t *title, wchar_t *path, int pathsz)
@@ -2213,6 +2245,93 @@ static int do_install(void)
 
 /* Play */
 
+/* Run imports in their own emulator process. It holds the destination lock
+ * while replacing the save, then exits before the real play session starts. */
+static int import_tamasave(const wchar_t *source, const wchar_t *dest)
+{
+    wchar_t emu[MAX_PATH], rom[MAX_PATH], cmd[MAX_PATH * 4 + 256], wdev[32];
+    char output[8192];
+    DWORD got = 0, exit_code = 1, gle;
+    HANDLE read_pipe = INVALID_HANDLE_VALUE, write_pipe = INVALID_HANDLE_VALUE;
+    HANDLE hnul = INVALID_HANDLE_VALUE;
+    SECURITY_ATTRIBUTES sa;
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+
+    join(emu, MAX_PATH, g_root, EMU_EXE);
+    get_text(IDC_ROM, rom, MAX_PATH);
+    if (!file_exists(emu)) {
+        say(MB_ICONERROR, L"Emulator missing", L"Not found:\n%s", emu);
+        return 0;
+    }
+    if (!rom[0] || !file_exists(rom)) {
+        say(MB_ICONERROR, L"ROM missing",
+            L"Choose the matching firmware ROM before importing a session.");
+        return 0;
+    }
+
+    a2w(g_dev->name, wdev, 32);
+    wappend(cmd, (int)(sizeof cmd / sizeof cmd[0]), 0,
+            L"\"%s\" \"%s\" --sav \"%s\" --device %s --persist-ram"
+            L" --import-tamasave \"%s\" --import-only",
+            emu, rom, dest, wdev, source);
+
+    sa.nLength = sizeof sa;
+    sa.lpSecurityDescriptor = NULL;
+    sa.bInheritHandle = TRUE;
+    if (!CreatePipe(&read_pipe, &write_pipe, &sa, 0)) {
+        say(MB_ICONERROR, L"Could not import this session",
+            L"Could not capture the emulator's import result (error %lu).", GetLastError());
+        return 0;
+    }
+    SetHandleInformation(read_pipe, HANDLE_FLAG_INHERIT, 0);
+    hnul = CreateFileW(L"NUL", GENERIC_READ,
+                       FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
+                       OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    memset(&si, 0, sizeof si);
+    memset(&pi, 0, sizeof pi);
+    si.cb = sizeof si;
+    si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    si.hStdInput = hnul == INVALID_HANDLE_VALUE ? NULL : hnul;
+    si.hStdOutput = write_pipe;
+    si.hStdError = write_pipe;
+
+    if (!CreateProcessW(emu, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW,
+                        NULL, g_root, &si, &pi)) {
+        gle = GetLastError();
+        CloseHandle(read_pipe);
+        CloseHandle(write_pipe);
+        if (hnul != INVALID_HANDLE_VALUE) CloseHandle(hnul);
+        say(MB_ICONERROR, L"Could not import this session",
+            L"Could not start the emulator (error %lu).", gle);
+        return 0;
+    }
+    CloseHandle(pi.hThread);
+    CloseHandle(write_pipe);
+    if (hnul != INVALID_HANDLE_VALUE) CloseHandle(hnul);
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    GetExitCodeProcess(pi.hProcess, &exit_code);
+    CloseHandle(pi.hProcess);
+    if (ReadFile(read_pipe, output, sizeof output - 1, &got, NULL))
+        output[got] = '\0';
+    else
+        output[0] = '\0';
+    CloseHandle(read_pipe);
+
+    if (exit_code != 0) {
+        wchar_t why[8192];
+        if (!output[0] || MultiByteToWideChar(CP_ACP, 0, output, -1,
+                                              why, (int)(sizeof why / sizeof why[0])) == 0)
+            _snwprintf(why, sizeof why / sizeof why[0],
+                       L"The emulator refused the import (exit code %lu).", exit_code);
+        why[sizeof why / sizeof why[0] - 1] = L'\0';
+        say(MB_ICONERROR, L"Could not import this session", L"%s", why);
+        return 0;
+    }
+    return 1;
+}
+
 /* Detach the emulator so launcher exit does not end the game. */
 static void do_play(void)
 {
@@ -2240,6 +2359,7 @@ static void do_play(void)
     int buttons = (IsDlgButtonChecked(g_main, IDC_BUTTONS) == BST_CHECKED);
     int ontop   = (IsDlgButtonChecked(g_main, IDC_ONTOP)   == BST_CHECKED);
     g_resume    = (IsDlgButtonChecked(g_main, IDC_RESUME)  == BST_CHECKED);
+    g_update_handoff = (IsDlgButtonChecked(g_main, IDC_UPDATE_HANDOFF) == BST_CHECKED);
 
     /* Use the save file the player picked. Otherwise, let the emulator make
      * the normal folder beside the ROM. */
@@ -2253,6 +2373,7 @@ static void do_play(void)
     at = wappend(cmd, CMDCAP, at, L" --device %s", wname);
     at = wappend(cmd, CMDCAP, at, L" --persist-ram");
     at = append_resume_flag(cmd, CMDCAP, at, g_resume);
+    if (g_update_handoff) at = wappend(cmd, CMDCAP, at, L" --update-handoff-on-exit");
     /* No --rtc-mult: the game clock is changed in the emulator with +/-. */
     if (awake)     at = wappend(cmd, CMDCAP, at, L" --stay-awake");
     if (!buttons)  at = wappend(cmd, CMDCAP, at, L" --no-buttons");
@@ -2423,6 +2544,9 @@ static void build_ui(void)
        LBLX + 250, OPTY + 1, 110, 20, IDC_ONTOP);
     mk(L"BUTTON", L"Resume last session", WS_TABSTOP | BS_AUTOCHECKBOX,
        LBLX + 370, OPTY + 1, 150, 20, IDC_RESUME);
+    /* Only update the in-progress save on exit when the player has asked for it. */
+    mk(L"BUTTON", L"Update in-progress save on exit", WS_TABSTOP | BS_AUTOCHECKBOX,
+       LBLX + 530, OPTY + 1, 210, 20, IDC_UPDATE_HANDOFF);
     /* Stay awake defaults on so device sleep is not mistaken for a freeze. */
     CheckDlgButton(g_main, IDC_AWAKE, BST_CHECKED);
     /* Button visibility is a persistent preference. */
@@ -2435,6 +2559,10 @@ static void build_ui(void)
     g_resume = reg_get(REG_RESUME, 1) ? 1 : 0;
     CheckDlgButton(g_main, IDC_RESUME,
                    g_resume ? BST_CHECKED : BST_UNCHECKED);
+    /* In-progress saves are opt-in because they are copies, not live shared saves. */
+    g_update_handoff = reg_get(REG_UPDATE_HANDOFF, 0) ? 1 : 0;
+    CheckDlgButton(g_main, IDC_UPDATE_HANDOFF,
+                   g_update_handoff ? BST_CHECKED : BST_UNCHECKED);
 
     /* Load bindings at startup; Play reads them even if Help was never opened. */
     load_keys();
@@ -2597,9 +2725,26 @@ static LRESULT CALLBACK wndproc(HWND hw, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_SAV_BR: {
             wchar_t sav[MAX_PATH];
             savepath(sav, MAX_PATH);
-            if (pick_file(L"Select a save (.sav) to view / edit / play",
-                          L"Save files (*.sav)\0*.sav\0All files\0*.*\0",
+            if (pick_file(L"Select a save (.sav) or in-progress save (.tamasave)",
+                          L"Saves and in-progress saves (*.sav;*.tamasave)\0*.sav;*.tamasave\0"
+                          L"Save files (*.sav)\0*.sav\0In-progress saves (*.tamasave)\0*.tamasave\0"
+                          L"All files\0*.*\0",
                           sav, MAX_PATH)) {
+                if (is_tamasave_path(sav)) {
+                    wchar_t dest[MAX_PATH];
+                    /* DLC works with raw saves, so leave the Save box on the
+                     * imported .sav instead of the in-progress save file. */
+                    default_savepath(dest, MAX_PATH);
+                    if (!pick_save_destination(dest, MAX_PATH)) return 0;
+                    if (!import_tamasave(sav, dest)) return 0;
+                    set_text(IDC_SAV, dest);
+                    g_save_follows_rom = 0;
+                    refresh_status();
+                    refresh_devnote();
+                    say(MB_ICONINFORMATION, L"In-progress save imported",
+                        L"Imported the in-progress save into:\n%s", dest);
+                    return 0;
+                }
                 set_text(IDC_SAV, sav);
                 g_save_follows_rom = 0;
                 refresh_status();
@@ -2638,6 +2783,10 @@ static LRESULT CALLBACK wndproc(HWND hw, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_RESUME:
             g_resume = IsDlgButtonChecked(g_main, IDC_RESUME) == BST_CHECKED;
             reg_set(REG_RESUME, g_resume);
+            return 0;
+        case IDC_UPDATE_HANDOFF:
+            g_update_handoff = IsDlgButtonChecked(g_main, IDC_UPDATE_HANDOFF) == BST_CHECKED;
+            reg_set(REG_UPDATE_HANDOFF, g_update_handoff);
             return 0;
         }
         return 0;
