@@ -54,7 +54,7 @@ typedef struct DeviceProfile {
 #define PS_IVRAM_BASE   0x00080000u
 #define PS_IVRAM_SIZE   0x00003000u   /* 12KB */
 #define PS_DSTRAM_BASE  0x00084000u
-#define PS_DSTRAM_SIZE  0x00000800u   /* 2KB */
+#define PS_DSTRAM_SIZE  0x00001000u   /* 4KB */
 #define PS_IO_BASE      0x00300000u
 #define PS_IO_END       0x00302000u
 #define PS_LCD_CMD_ADDR  0x00600000u
@@ -68,7 +68,7 @@ typedef struct DeviceProfile {
 /* Compile-time storage ceilings; device_check() rejects larger profiles. */
 #define A0RAM_MAX   0x00008000u
 #define IVRAM_MAX   0x00003000u
-#define DSTRAM_MAX  0x00000800u
+#define DSTRAM_MAX  0x00001000u
 #define IORAM_MAX   0x00002000u
 
 /* device.c */

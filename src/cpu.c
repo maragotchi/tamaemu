@@ -291,6 +291,7 @@ static void exec_insn(Emu *e, uint16_t hw, uint32_t iaddr, int in_slot);
 /* execute exactly one instruction (ext prefixes folded) at e->pc; no irq check */
 static void step_one(Emu *e, int in_slot)
 {
+    e->pc &= 0x0FFFFFFFu;   /* 28-bit address bus */
     if (!pc_mapped(e, e->pc)) { bad_pc(e); return; }
     uint16_t hw = mem_read16(e, e->pc);
     int guard = 0;
